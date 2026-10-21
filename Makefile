@@ -1202,7 +1202,8 @@ clean: clean-tools
 	rm -f $(OBJECTS) $(TARGET) $(OBJECTS:.o=.d) .build-flags
 
 clean-tools:
-	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS)
+	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) \
+		$(CORE_CHECKS) tools/test_prsp_dmem_wrap.o
 
 # Angrylion benchmark and bit-exactness harnesses (tools/angrylion_*.c),
 # linked against the core's own angrylion objects: `make tools` after a
@@ -1256,12 +1257,22 @@ angrylion_clip_test$(EXE_EXT): tools/angrylion_clip_test.c $(ANGRYLION_EMIT_OBJS
 ANGRYLION_WALKER_OBJS := $(filter-out $(VIDEODIR_ANGRYLION)/rdp_emit_hle.o, \
 	$(patsubst %.c,%.o,$(wildcard $(VIDEODIR_ANGRYLION)/rdp_emit*.c))) \
 	$(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.o \
-	$(LIBRETRO_COMM_DIR)/features/features_cpu.o
+	$(LIBRETRO_COMM_DIR)/features/features_cpu.o \
+	$(LIBRETRO_COMM_DIR)/time/rtime.o
 angrylion_f3d_near_test$(EXE_EXT): tools/angrylion_f3d_near_test.c $(ANGRYLION_WALKER_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
 
+# Emitter divide unit against the cxd4 interpreter's VRCP/VRSQ pairs.
+angrylion_divide_test$(EXE_EXT): tools/angrylion_divide_test.c $(CXD4DIR)/rsp.o $(ANGRYLION_EMIT_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(CXD4DIR)/rsp.o $(ANGRYLION_EMIT_OBJS) -o $@ -lm
+
+# Rogue Squadron walker: the list's own SYNC_FULL is not forwarded.
+angrylion_rs_fullsync_test$(EXE_EXT): tools/angrylion_rs_fullsync_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
 ANGRYLION_CHECKS := angrylion_vemit_test$(EXE_EXT) angrylion_gen_test$(EXE_EXT) \
-	angrylion_clip_test$(EXE_EXT) angrylion_f3d_near_test$(EXE_EXT)
+	angrylion_clip_test$(EXE_EXT) angrylion_f3d_near_test$(EXE_EXT) \
+	angrylion_divide_test$(EXE_EXT) angrylion_rs_fullsync_test$(EXE_EXT)
 
 tools: $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS)
 
@@ -1270,7 +1281,92 @@ tools: $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLIO
 check-angrylion: $(ANGRYLION_CHECKS)
 	@set -e; for t in $(ANGRYLION_CHECKS); do echo "== $$t"; ./$$t; done
 
-.PHONY: clean clean-tools tools check-angrylion
+# Core self-tests: MMIO register and DMA bounds, the frontend memory map,
+# framebuffer write notifications, COP0 exceptions, PI status, the MusyX
+# voice loaders, the BOSS audio arithmetic and, in a HAVE_PARALLEL_RSP=1
+# build, the paraLLEl-RSP DMEM wrap.  Each unit under test is compiled into
+# its test; sanitizers are used where the toolchain has them.
+ifeq ($(EXE_EXT),.exe)
+CHECK_SANITIZE ?=
+else
+CHECK_SANITIZE ?= -fsanitize=address,undefined -fno-sanitize-recover=all
+endif
+CHECK_CFLAGS  := -O1 -g -w -ffunction-sections -fdata-sections
+CHECK_LDFLAGS := -Wl,--gc-sections
+
+CORE_DEVICE_DIR := $(CORE_DIR)/src/device
+TEST_RCP_BOUNDS_SRCS := $(CORE_DEVICE_DIR)/rcp/ai/ai_controller.c \
+	$(CORE_DEVICE_DIR)/rcp/mi/mi_controller.c \
+	$(CORE_DEVICE_DIR)/rcp/pi/pi_controller.c \
+	$(CORE_DEVICE_DIR)/rcp/rdp/rdp_core.c \
+	$(CORE_DEVICE_DIR)/rcp/ri/ri_controller.c \
+	$(CORE_DEVICE_DIR)/rcp/rsp/rsp_core.c \
+	$(CORE_DEVICE_DIR)/rcp/si/si_controller.c \
+	$(CORE_DEVICE_DIR)/rcp/vi/vi_controller.c \
+	$(CORE_DEVICE_DIR)/cart/sram.c \
+	$(CORE_DEVICE_DIR)/dd/dd_controller.c \
+	$(CORE_DIR)/src/api/callbacks.c
+test_rcp_bounds$(EXE_EXT): tools/test_rcp_bounds.c $(TEST_RCP_BOUNDS_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_memory_map$(EXE_EXT): tools/test_memory_map.c $(CORE_DEVICE_DIR)/device_memory_map.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_fb_write$(EXE_EXT): tools/test_fb_write.c $(CORE_DEVICE_DIR)/rcp/rdp/fb.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+TEST_CP0_SRCS := $(CORE_DEVICE_DIR)/r4300/cp0.c $(CORE_DEVICE_DIR)/r4300/interrupt.c
+test_cp0_exceptions$(EXE_EXT): tools/test_cp0_exceptions.c $(TEST_CP0_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# -Ofast as the core itself is built, so the compares are checked under the
+# same floating-point assumptions
+test_fpu_compare$(EXE_EXT): tools/test_fpu_compare.c
+	$(CC) $(CHECK_CFLAGS) -Ofast $(CHECK_SANITIZE) -I$(CORE_DIR)/src \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+TEST_PI_SRCS := $(CORE_DEVICE_DIR)/rcp/pi/pi_controller.c $(CORE_DEVICE_DIR)/rcp/mi/mi_controller.c
+test_pi_status$(EXE_EXT): tools/test_pi_status.c $(TEST_PI_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+TEST_MUSYX_SRCS := $(RSPDIR)/src/hle_memory.c $(RSPDIR)/src/audio.c \
+	$(RSPDIR)/src/resample_hq.c
+test_musyx_bounds$(EXE_EXT): tools/test_musyx_bounds.c $(RSPDIR)/src/musyx.c $(TEST_MUSYX_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(TEST_MUSYX_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+ZBOSS_TEST_OBJS := $(filter-out $(VIDEODIR_ANGRYLION)/rdp_emit_zboss.o,$(ANGRYLION_WALKER_OBJS))
+angrylion_zboss_audio_test$(EXE_EXT): tools/angrylion_zboss_audio_test.c \
+		$(VIDEODIR_ANGRYLION)/rdp_emit_zboss.c $(ZBOSS_TEST_OBJS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_ANGRYLION) -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(ZBOSS_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write$(EXE_EXT) \
+	test_cp0_exceptions$(EXE_EXT) test_fpu_compare$(EXE_EXT) test_pi_status$(EXE_EXT) \
+	test_musyx_bounds$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT)
+
+ifeq ($(HAVE_PARALLEL_RSP), 1)
+PRSP_TEST_OBJS := $(filter $(RSPDIR_PARALLEL)/%,$(OBJECTS))
+test_prsp_dmem_wrap$(EXE_EXT): tools/test_prsp_dmem_wrap.c $(PRSP_TEST_OBJS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -c $< -o tools/test_prsp_dmem_wrap.o
+	$(CXX) tools/test_prsp_dmem_wrap.o $(PRSP_TEST_OBJS) -o $@ $(CHECK_SANITIZE) -lpthread -lm
+CORE_CHECKS += test_prsp_dmem_wrap$(EXE_EXT)
+endif
+
+check-core: $(CORE_CHECKS)
+	@set -e; for t in $(CORE_CHECKS); do echo "== $$t"; ./$$t; done
+
+.PHONY: clean clean-tools tools check-angrylion check-core
 -include $(OBJECTS:.o=.d)
 
 # A header named by an existing .d file but since deleted is not an error:

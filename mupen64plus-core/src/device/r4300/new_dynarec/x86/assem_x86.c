@@ -3051,17 +3051,32 @@ static void loadlr_assemble_x86(int i,struct regstat *i_regs)
 
         if(shift) {
           emit_readdword_tlb((constmap[i][s]+offset)&~7,map,temp2h,temp2);
-          if (opcode[i]==0x1B) {
-            emit_shrdimm(temp2h,temp2,shift,temp2h);
-            emit_shrimm(temp2,shift,temp2);
-          } else {
-            emit_shldimm(temp2h,temp2,shift,temp2h);
-            emit_shlimm(temp2,shift,temp2);
+          /* temp2h:temp2 is the aligned doubleword; shift it into place
+           * and merge the bytes it covers. A shift of 32 or more moves
+           * one word into the other half and leaves the far half alone. */
+          if (opcode[i]==0x1B) { // LDR
+            if(shift<32) {
+              emit_shrdimm(temp2,temp2h,shift,temp2);
+              emit_shrimm(temp2h,shift,temp2h);
+              emit_andimm(th,~(mask>>32),th);
+              emit_or(temp2h,th,th);
+            }
+            else if(shift>32)
+              emit_shrimm(temp2h,shift-32,temp2h);
+            emit_andimm(tl,~mask,tl);
+            emit_or(shift<32?temp2:temp2h,tl,tl);
+          } else { // LDL
+            if(shift<32) {
+              emit_shldimm(temp2h,temp2,shift,temp2h);
+              emit_shlimm(temp2,shift,temp2);
+              emit_andimm(tl,~mask,tl);
+              emit_or(temp2,tl,tl);
+            }
+            else if(shift>32)
+              emit_shlimm(temp2,shift-32,temp2);
+            emit_andimm(th,~(mask>>32),th);
+            emit_or(shift<32?temp2h:temp2,th,th);
           }
-          emit_andimm(tl,~mask,tl);
-          emit_andimm(th,~mask>>32,th);
-          emit_or(temp2,tl,tl);
-          emit_or(temp2h,th,th);
         }
         else
           emit_readdword_tlb((constmap[i][s]+offset)&~7,map,th,tl);
@@ -3394,13 +3409,9 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     return;
   }
 
-  if((source[i]&0x3e)==0x38) {
-    // sf/ngle - these should throw exceptions for NaNs
-    emit_andimm(fs,~0x800000,fs);
-    return;
-  }
-
-  if(opcode2[i]==0x10) {
+  // The signalling compares (sf..ngt) raise Invalid Operation on any NaN;
+  // only the C implementations model that.
+  if(opcode2[i]==0x10&&!(source[i]&8)) {
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_simple[(source[i]>>16)&0x1f],temp);
     emit_flds(temp);
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_simple[(source[i]>>11)&0x1f],temp);
@@ -3417,15 +3428,9 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     if((source[i]&0x3f)==0x35) emit_cmovnc_reg(temp,fs); // c_ult_s
     if((source[i]&0x3f)==0x36) {emit_cmova_reg(temp,fs);emit_cmovp_reg(temp,fs);} // c_ole_s
     if((source[i]&0x3f)==0x37) emit_cmova_reg(temp,fs); // c_ule_s
-    if((source[i]&0x3f)==0x3a) emit_cmovne_reg(temp,fs); // c_seq_s
-    if((source[i]&0x3f)==0x3b) emit_cmovne_reg(temp,fs); // c_ngl_s
-    if((source[i]&0x3f)==0x3c) emit_cmovnc_reg(temp,fs); // c_lt_s
-    if((source[i]&0x3f)==0x3d) emit_cmovnc_reg(temp,fs); // c_nge_s
-    if((source[i]&0x3f)==0x3e) emit_cmova_reg(temp,fs); // c_le_s
-    if((source[i]&0x3f)==0x3f) emit_cmova_reg(temp,fs); // c_ngt_s
     return;
   }
-  if(opcode2[i]==0x11) {
+  if(opcode2[i]==0x11&&!(source[i]&8)) {
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_double[(source[i]>>16)&0x1f],temp);
     emit_fldl(temp);
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_double[(source[i]>>11)&0x1f],temp);
@@ -3442,12 +3447,6 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     if((source[i]&0x3f)==0x35) emit_cmovnc_reg(temp,fs); // c_ult_d
     if((source[i]&0x3f)==0x36) {emit_cmova_reg(temp,fs);emit_cmovp_reg(temp,fs);} // c_ole_d
     if((source[i]&0x3f)==0x37) emit_cmova_reg(temp,fs); // c_ule_d
-    if((source[i]&0x3f)==0x3a) emit_cmovne_reg(temp,fs); // c_seq_d
-    if((source[i]&0x3f)==0x3b) emit_cmovne_reg(temp,fs); // c_ngl_d
-    if((source[i]&0x3f)==0x3c) emit_cmovnc_reg(temp,fs); // c_lt_d
-    if((source[i]&0x3f)==0x3d) emit_cmovnc_reg(temp,fs); // c_nge_d
-    if((source[i]&0x3f)==0x3e) emit_cmova_reg(temp,fs); // c_le_d
-    if((source[i]&0x3f)==0x3f) emit_cmova_reg(temp,fs); // c_ngt_d
     return;
   }
 #endif
@@ -3741,24 +3740,53 @@ static void multdiv_assemble_x86(int i,struct regstat *i_regs)
       {
         signed char d1=get_reg(i_regs->regmap,rs1[i]);
         signed char d2=get_reg(i_regs->regmap,rs2[i]);
+        intptr_t jzero,jdone;
         assert(d1>=0);
         assert(d2>=0);
         emit_mov(d1,EAX);
 
         if(opcode2[i]==0x1A) //DIV
         {
+          intptr_t jminus,jdone2;
           emit_cdq();
           emit_test(d2,d2);
-          emit_jeq((int)out+8);
+          jzero=(intptr_t)out;
+          emit_jeq(0);
+          /* x/-1 is a negation; idiv would fault on INT32_MIN/-1 */
+          emit_cmpimm(d2,-1);
+          jminus=(intptr_t)out;
+          emit_jeq(0);
           emit_idiv(d2);
+          jdone=(intptr_t)out;
+          emit_jmp(0);
+          set_jump_target(jminus,(intptr_t)out);
+          emit_neg(EAX,EAX);
+          emit_zeroreg(EDX);
+          jdone2=(intptr_t)out;
+          emit_jmp(0);
+          /* x/0: LO = x<0 ? 1 : -1, HI = x */
+          set_jump_target(jzero,(intptr_t)out);
+          emit_mov(EAX,EDX);
+          emit_sarimm(EAX,31,EAX);
+          emit_shlimm(EAX,1,EAX);
+          emit_not(EAX,EAX);
+          set_jump_target(jdone2,(intptr_t)out);
         }
-        else if(opcode2[i]==0x1B) //DIVU
+        else //DIVU
         {
           emit_zeroreg(EDX);
           emit_test(d2,d2);
-          emit_jeq((int)out+8);
+          jzero=(intptr_t)out;
+          emit_jeq(0);
           emit_div(d2);
+          jdone=(intptr_t)out;
+          emit_jmp(0);
+          /* x/0: LO = -1, HI = x */
+          set_jump_target(jzero,(intptr_t)out);
+          emit_mov(EAX,EDX);
+          emit_movimm(-1,EAX);
         }
+        set_jump_target(jdone,(intptr_t)out);
       }
       else
 #endif

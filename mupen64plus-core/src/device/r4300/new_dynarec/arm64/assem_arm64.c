@@ -258,6 +258,11 @@ static uintptr_t jump_table_symbols[] = {
   (intptr_t)SWR_new,
   (intptr_t)SDL_new,
   (intptr_t)SDR_new,
+  (intptr_t)DMFC0_new,
+  (intptr_t)LL_new,
+  (intptr_t)LLD_new,
+  (intptr_t)SC_new,
+  (intptr_t)SCD_new,
   (intptr_t)breakpoint
 };
 
@@ -3488,17 +3493,32 @@ static void loadlr_assemble_arm64(int i,struct regstat *i_regs)
 
         if(shift) {
           emit_readdword_indexed_tlb(0,temp2,map,temp2h,temp2);
-          if (opcode[i]==0x1B) {
-            emit_shrdimm(temp2h,temp2,shift,temp2h);
-            emit_shrimm(temp2,shift,temp2);
-          } else {
-            emit_shldimm(temp2h,temp2,shift,temp2h);
-            emit_shlimm(temp2,shift,temp2);
+          /* temp2h:temp2 is the aligned doubleword; shift it into place
+           * and merge the bytes it covers. A shift of 32 or more moves
+           * one word into the other half and leaves the far half alone. */
+          if (opcode[i]==0x1B) { // LDR
+            if(shift<32) {
+              emit_shrdimm(temp2,temp2h,shift,temp2);
+              emit_shrimm(temp2h,shift,temp2h);
+              emit_andimm(th,~(mask>>32),th);
+              emit_or(temp2h,th,th);
+            }
+            else if(shift>32)
+              emit_shrimm(temp2h,shift-32,temp2h);
+            emit_andimm(tl,~mask,tl);
+            emit_or(shift<32?temp2:temp2h,tl,tl);
+          } else { // LDL
+            if(shift<32) {
+              emit_shldimm(temp2h,temp2,shift,temp2h);
+              emit_shlimm(temp2,shift,temp2);
+              emit_andimm(tl,~mask,tl);
+              emit_or(temp2,tl,tl);
+            }
+            else if(shift>32)
+              emit_shlimm(temp2,shift-32,temp2);
+            emit_andimm(th,~(mask>>32),th);
+            emit_or(shift<32?temp2h:temp2,th,th);
           }
-          emit_andimm(tl,~mask,tl);
-          emit_andimm(th,~mask>>32,th);
-          emit_or(temp2,tl,tl);
-          emit_or(temp2h,th,th);
         }
         else
           emit_readdword_indexed_tlb(0,temp2,map,th,tl);
@@ -3930,13 +3950,9 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     return;
   }
 
-  if((source[i]&0x3e)==0x38) {
-    // sf/ngle - these should throw exceptions for NaNs
-    emit_andimm(fs,~0x800000,fs);
-    return;
-  }
-
-  if(opcode2[i]==0x10) {
+  // The signalling compares (sf..ngt) raise Invalid Operation on any NaN;
+  // only the C implementations model that.
+  if(opcode2[i]==0x10&&!(source[i]&8)) {
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_simple[(source[i]>>11)&0x1f],temp);
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_simple[(source[i]>>16)&0x1f],HOST_TEMPREG);
     emit_flds(temp,30);
@@ -3951,15 +3967,9 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     if((source[i]&0x3f)==0x35) {emit_csel_cc(temp,fs,fs);emit_csel_vs(temp,fs,fs);} // c_ult_s
     if((source[i]&0x3f)==0x36) emit_csel_ls(temp,fs,fs); // c_ole_s
     if((source[i]&0x3f)==0x37) {emit_csel_ls(temp,fs,fs);emit_csel_vs(temp,fs,fs);} // c_ule_s
-    if((source[i]&0x3f)==0x3a) emit_csel_eq(temp,fs,fs); // c_seq_s
-    if((source[i]&0x3f)==0x3b) emit_csel_eq(temp,fs,fs); // c_ngl_s
-    if((source[i]&0x3f)==0x3c) emit_csel_cc(temp,fs,fs); // c_lt_s
-    if((source[i]&0x3f)==0x3d) emit_csel_cc(temp,fs,fs); // c_nge_s
-    if((source[i]&0x3f)==0x3e) emit_csel_ls(temp,fs,fs); // c_le_s
-    if((source[i]&0x3f)==0x3f) emit_csel_ls(temp,fs,fs); // c_ngt_s
     return;
   }
-  if(opcode2[i]==0x11) {
+  if(opcode2[i]==0x11&&!(source[i]&8)) {
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_double[(source[i]>>11)&0x1f],temp);
     emit_readptr((intptr_t)&g_dev.r4300.new_dynarec_hot_state.cp1_regs_double[(source[i]>>16)&0x1f],HOST_TEMPREG);
     emit_fldd(temp,30);
@@ -3974,12 +3984,6 @@ static void fcomp_assemble(int i,struct regstat *i_regs)
     if((source[i]&0x3f)==0x35) {emit_csel_cc(temp,fs,fs);emit_csel_vs(temp,fs,fs);} // c_ult_d
     if((source[i]&0x3f)==0x36) emit_csel_ls(temp,fs,fs); // c_ole_d
     if((source[i]&0x3f)==0x37) {emit_csel_ls(temp,fs,fs);emit_csel_vs(temp,fs,fs);} // c_ule_d
-    if((source[i]&0x3f)==0x3a) emit_csel_eq(temp,fs,fs); // c_seq_d
-    if((source[i]&0x3f)==0x3b) emit_csel_eq(temp,fs,fs); // c_ngl_d
-    if((source[i]&0x3f)==0x3c) emit_csel_cc(temp,fs,fs); // c_lt_d
-    if((source[i]&0x3f)==0x3d) emit_csel_cc(temp,fs,fs); // c_nge_d
-    if((source[i]&0x3f)==0x3e) emit_csel_ls(temp,fs,fs); // c_le_d
-    if((source[i]&0x3f)==0x3f) emit_csel_ls(temp,fs,fs); // c_ngt_d
     return;
   }
 #endif
@@ -4297,6 +4301,7 @@ static void multdiv_assemble_arm64(int i,struct regstat *i_regs)
 #ifndef INTERPRET_DIV
       if((opcode2[i]==0x1A) || (opcode2[i]==0x1B))
       {
+        intptr_t jzero,jdone;
         signed char numerator=get_reg(i_regs->regmap,rs1[i]);
         signed char denominator=get_reg(i_regs->regmap,rs2[i]);
         assert(numerator>=0);
@@ -4306,7 +4311,7 @@ static void multdiv_assemble_arm64(int i,struct regstat *i_regs)
         assert(quotient>=0);
         assert(remainder>=0);
         emit_test(denominator,denominator);
-        intptr_t jaddr=(intptr_t)out;
+        jzero=(intptr_t)out;
         emit_jeq(0); // Division by zero
 
         if(opcode2[i]==0x1A) //DIV
@@ -4315,7 +4320,21 @@ static void multdiv_assemble_arm64(int i,struct regstat *i_regs)
           emit_udiv(numerator,denominator,quotient);
 
         emit_msub(quotient,denominator,numerator,remainder);
-        set_jump_target(jaddr,(intptr_t)out);
+        jdone=(intptr_t)out;
+        emit_jmp(0);
+
+        /* x/0: HI = x, LO = -1 for DIVU and x<0 ? 1 : -1 for DIV */
+        set_jump_target(jzero,(intptr_t)out);
+        if(opcode2[i]==0x1A) {
+          emit_sarimm(numerator,31,HOST_TEMPREG);
+          emit_mov(numerator,remainder);
+          emit_shlimm(HOST_TEMPREG,1,HOST_TEMPREG);
+          emit_not(HOST_TEMPREG,quotient);
+        } else {
+          emit_mov(numerator,remainder);
+          emit_movimm(-1,quotient);
+        }
+        set_jump_target(jdone,(intptr_t)out);
       }
       else
 #endif

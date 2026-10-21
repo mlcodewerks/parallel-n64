@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <vector>
 #include "FrameBuffer.h"
+#include "StereoFrames.h"
+#include "gSP.h"
 #include "DepthBuffer.h"
 #include "N64.h"
 #include "RSP.h"
@@ -558,6 +560,7 @@ void FrameBufferList::init()
 void FrameBufferList::destroy() {
 	gfxContext.bindFramebuffer(bufferTarget::FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
 	m_list.clear();
+	StereoFrames_destroy();
 	m_pCurrent = nullptr;
 	m_pCopy = nullptr;
 	m_overscan.destroy();
@@ -686,6 +689,14 @@ void FrameBufferList::saveBuffer(u32 _address, u16 _format, u16 _size, u16 _widt
 		if (m_list.empty())
 			_createScreenSizeBuffer();
 		return;
+	}
+
+	// stereoscopic 3D
+	if (m_pCurrent != nullptr && !m_pCurrent->m_isDepthBuffer && g_stereoFramesCapturing &&
+		StereoFrames_wasEntered(m_pCurrent->m_startAddress)) {
+		StereoFrames_captureLeftEye(m_pCurrent);
+		// The copy binds the screen; leave the state as the walk had it
+		gfxContext.bindFramebuffer(bufferTarget::DRAW_FRAMEBUFFER, m_pCurrent->m_FBO);
 	}
 
 	if (m_pCurrent != nullptr &&
@@ -823,6 +834,14 @@ void FrameBufferList::saveBuffer(u32 _address, u16 _format, u16 _size, u16 _widt
 	}
 
 	m_pCurrent->m_isDepthBuffer = _address == gDP.depthImageAddress;
+	// Immersive mode
+	if (gSPImmersiveClearsShownBuffers() && !m_pCurrent->m_isDepthBuffer && !m_pCurrent->isAuxiliary() &&
+		m_pCurrent->m_swapCount != wnd.getBuffersSwapCount()) {
+		gfxContext.bindFramebuffer(bufferTarget::FRAMEBUFFER, m_pCurrent->m_FBO);
+		gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	if (config.stereo.mode == Config::stereoBothEyes)
+		StereoFrames_noteEntered(m_pCurrent->m_startAddress);
 	m_pCurrent->m_isPauseScreen = m_pCurrent->m_isOBScreen = false;
 	m_pCurrent->m_copied = false;
 	m_pCurrent->m_swapCount = wnd.getBuffersSwapCount();
@@ -1021,6 +1040,8 @@ void FrameBufferList::_renderScreenSizeBuffer()
 
 	gfxContext.bindFramebuffer(bufferTarget::READ_FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
 
+	if (config.stereo.mode != Config::stereoOff)
+		gSPStereoEndFrame();
 	wnd.swapBuffers();
 	gfxContext.bindFramebuffer(bufferTarget::DRAW_FRAMEBUFFER, pBuffer->m_FBO);
 	if (config.frameBufferEmulation.forceDepthBufferClear != 0) {
@@ -1282,7 +1303,7 @@ void FrameBufferList::OverscanBuffer::activate()
 	gfxContext.bindFramebuffer(bufferTarget::DRAW_FRAMEBUFFER, m_FBO);
 }
 
-void FrameBufferList::OverscanBuffer::draw(u32 _fullHeight, bool _PAL)
+void FrameBufferList::OverscanBuffer::draw(u32 _fullHeight, bool _PAL, s32 _x, u32 _windowWidth, bool _clear)
 {
 	if (!m_enabled)
 		return;
@@ -1303,11 +1324,11 @@ void FrameBufferList::OverscanBuffer::draw(u32 _fullHeight, bool _PAL)
 	blitParams.srcY1 = top;
 	blitParams.srcWidth = m_pTexture->realWidth;
 	blitParams.srcHeight = m_pTexture->realHeight;
-	blitParams.dstX0 = m_hOffset;
+	blitParams.dstX0 = _x + m_hOffset;
 	blitParams.dstY0 = m_vOffset + wnd.getHeightOffset();
-	blitParams.dstX1 = m_hOffset + wnd.getWidth();
+	blitParams.dstX1 = _x + m_hOffset + wnd.getWidth();
 	blitParams.dstY1 = m_vOffset + wnd.getHeight() + wnd.getHeightOffset();
-	blitParams.dstWidth = wnd.getScreenWidth();
+	blitParams.dstWidth = _windowWidth;
 	blitParams.dstHeight = wnd.getScreenHeight() + wnd.getHeightOffset();
 	blitParams.filter = textureParameters::FILTER_LINEAR;
 	blitParams.mask = blitMask::COLOR_BUFFER;
@@ -1316,8 +1337,8 @@ void FrameBufferList::OverscanBuffer::draw(u32 _fullHeight, bool _PAL)
 	blitParams.readBuffer = m_FBO;
 	blitParams.invertY = false;
 
-	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
-//	drawer.blitOrCopyTexturedRect(blitParams);
+	if (_clear)
+		gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
 	drawer.copyTexturedRect(blitParams);
 }
 
@@ -1431,9 +1452,8 @@ void FrameBufferList::renderBuffer()
 		srcY1 = srcY0 + srcHeight;
 	}
 	PostProcessor & postProcessor = PostProcessor::get();
-	FrameBuffer * pFilteredBuffer = pBuffer;
-	for (const auto & f : postProcessor.getPostprocessingList())
-		pFilteredBuffer = f(postProcessor, pFilteredBuffer);
+	// Post-processing keeps the buffer's scale and size, so the presented area is measured on it
+	const FrameBuffer * pFilteredBuffer = pBuffer;
 
 	const f32 viScaleX = _FIXED2FLOAT(_SHIFTR(*REG.VI_X_SCALE, 0, 12), 10);
 	const f32 srcScaleX = pFilteredBuffer->m_scale;
@@ -1465,78 +1485,116 @@ void FrameBufferList::renderBuffer()
 						vOffset + (s32)(dstY0*dstScaleY),
 						hOffset + dstX1,
 						vOffset + (s32)(dstY1*dstScaleY) };
-
-	TextureParam filter = textureParameters::FILTER_LINEAR;
-	ObjectHandle readBuffer;
-
-	if (pFilteredBuffer->m_pTexture->frameBufferTexture == CachedTexture::fbMultiSample) {
-		pFilteredBuffer->resolveMultisampledTexture(true);
-		readBuffer = pFilteredBuffer->m_resolveFBO;
-		pBufferTexture = pFilteredBuffer->m_pResolveTexture;
-	} else {
-		readBuffer = pFilteredBuffer->m_FBO;
+	if (config.stereo.immersive != 0 && !gSPImmersiveIsFlat() && pNextBuffer == nullptr) {
+		// Immersive mode: the picture must fill exactly the field of view
+		dstCoord[0] = 0;
+		dstCoord[1] = 0;
+		dstCoord[2] = static_cast<s32>(m_overscan.getBufferWidth());
+		dstCoord[3] = static_cast<s32>(m_overscan.getBufferHeight());
 	}
 
-	m_overscan.activate();
-	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+	// Stereoscopic 3D: GLideN64 draws for one eye's window; each eye is presented into its half
+	const u32 eyes = config.stereo.mode == Config::stereoBothEyes ? 2U : 1U;
+	const s32 eyeWidth = static_cast<s32>(wnd.getScreenWidth());
+	const bool overscan = config.frameBufferEmulation.enableOverscan != 0;
+	for (u32 eye = 0; eye < eyes; ++eye) {
+		const s32 eyeOffset = static_cast<s32>(eye) * eyeWidth;
+		const s32 dstOffset = overscan ? 0 : eyeOffset;
+		const u32 dstWidth = overscan ? m_overscan.getBufferWidth() : m_overscan.getBufferWidth() * eyes;
+		FrameBuffer * pSource = pBuffer;
+		FrameBuffer * pEyeBuffer;
+		CachedTexture * pEyeTexture;
+		ObjectHandle readBuffer;
 
-	GraphicsDrawer::BlitOrCopyRectParams blitParams;
-	blitParams.srcX0 = srcCoord[0];
-	blitParams.srcY0 = srcCoord[1];
-	blitParams.srcX1 = srcCoord[2];
-	blitParams.srcY1 = srcCoord[3];
-	blitParams.srcWidth = pBufferTexture->realWidth;
-	blitParams.srcHeight = pBufferTexture->realHeight;
-	blitParams.dstX0 = dstCoord[0];
-	blitParams.dstY0 = dstCoord[1];
-	blitParams.dstX1 = dstCoord[2];
-	blitParams.dstY1 = dstCoord[3];
-	blitParams.dstWidth = m_overscan.getBufferWidth();
-	blitParams.dstHeight = m_overscan.getBufferHeight();
-	blitParams.filter = filter;
-	blitParams.mask = blitMask::COLOR_BUFFER;
-	blitParams.tex[0] = pBufferTexture;
-	blitParams.combiner = CombinerInfo::get().getTexrectCopyProgram();
-	blitParams.readBuffer = readBuffer;
-	blitParams.invertY = config.frameBufferEmulation.enableOverscan == 0;
-
-	drawer.copyTexturedRect(blitParams);
-
-	if (pNextBuffer != nullptr) {
-		pNextBuffer->m_isMainBuffer = true;
-		pFilteredBuffer = pNextBuffer;
+		// The left eye from the copy its pass left, through the same post-processing
+		if (eyes == 2 && eye == 0) {
+			FrameBuffer * pLeftEye = StereoFrames_leftEye(pBuffer);
+			if (pLeftEye != nullptr)
+				pSource = pLeftEye;
+		}
+		pEyeBuffer = pSource;
 		for (const auto & f : postProcessor.getPostprocessingList())
-			pFilteredBuffer = f(postProcessor, pFilteredBuffer);
-		srcY1 = srcPartHeight;
-		dstY0 = dstY1;
-		dstY1 = dstY0 + dstPartHeight;
-		if (pFilteredBuffer->m_pTexture->frameBufferTexture == CachedTexture::fbMultiSample) {
-			pFilteredBuffer->resolveMultisampledTexture();
-			readBuffer = pFilteredBuffer->m_resolveFBO;
-			pBufferTexture = pFilteredBuffer->m_pResolveTexture;
-		}
-		else {
-			readBuffer = pFilteredBuffer->m_FBO;
-			pBufferTexture = pFilteredBuffer->m_pTexture;
+			pEyeBuffer = f(postProcessor, pEyeBuffer);
+		if (pEyeBuffer->m_pTexture->frameBufferTexture == CachedTexture::fbMultiSample) {
+			pEyeBuffer->resolveMultisampledTexture(true);
+			readBuffer = pEyeBuffer->m_resolveFBO;
+			pEyeTexture = pEyeBuffer->m_pResolveTexture;
+		} else {
+			readBuffer = pEyeBuffer->m_FBO;
+			pEyeTexture = pEyeBuffer->m_pTexture;
 		}
 
-		blitParams.srcY0 = 0;
-		blitParams.srcY1 = min((s32)(srcY1*srcScaleY), (s32)pFilteredBuffer->m_pTexture->realHeight);
-		blitParams.srcWidth = pBufferTexture->realWidth;
-		blitParams.srcHeight = pBufferTexture->realHeight;
-		blitParams.dstY0 = vOffset + (s32)(dstY0*dstScaleY);
-		blitParams.dstY1 = vOffset + (s32)(dstY1*dstScaleY);
-		blitParams.dstWidth = m_overscan.getBufferWidth();
+		m_overscan.activate();
+		// The window holds both eyes: only the first clears it
+		if (overscan || eye == 0)
+			gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+
+		GraphicsDrawer::BlitOrCopyRectParams blitParams;
+		blitParams.srcX0 = srcCoord[0];
+		blitParams.srcY0 = srcCoord[1];
+		blitParams.srcX1 = srcCoord[2];
+		blitParams.srcY1 = srcCoord[3];
+		blitParams.srcWidth = pEyeTexture->realWidth;
+		blitParams.srcHeight = pEyeTexture->realHeight;
+		blitParams.dstX0 = dstCoord[0] + dstOffset;
+		blitParams.dstY0 = dstCoord[1];
+		blitParams.dstX1 = dstCoord[2] + dstOffset;
+		blitParams.dstY1 = dstCoord[3];
+		blitParams.dstWidth = dstWidth;
 		blitParams.dstHeight = m_overscan.getBufferHeight();
-		blitParams.tex[0] = pBufferTexture;
+		blitParams.filter = textureParameters::FILTER_LINEAR;
+		blitParams.mask = blitMask::COLOR_BUFFER;
+		blitParams.tex[0] = pEyeTexture;
+		blitParams.combiner = CombinerInfo::get().getTexrectCopyProgram();
 		blitParams.readBuffer = readBuffer;
+		blitParams.invertY = !overscan;
 
 		drawer.copyTexturedRect(blitParams);
+
+		if (pNextBuffer != nullptr) {
+			const s32 nextY0 = dstY1;
+			const s32 nextY1 = nextY0 + dstPartHeight;
+			pNextBuffer->m_isMainBuffer = true;
+			pSource = pNextBuffer;
+			if (eyes == 2 && eye == 0) {
+				FrameBuffer * pLeftEye = StereoFrames_leftEye(pNextBuffer);
+				if (pLeftEye != nullptr)
+					pSource = pLeftEye;
+			}
+			pEyeBuffer = pSource;
+			for (const auto & f : postProcessor.getPostprocessingList())
+				pEyeBuffer = f(postProcessor, pEyeBuffer);
+			if (pEyeBuffer->m_pTexture->frameBufferTexture == CachedTexture::fbMultiSample) {
+				pEyeBuffer->resolveMultisampledTexture();
+				readBuffer = pEyeBuffer->m_resolveFBO;
+				pEyeTexture = pEyeBuffer->m_pResolveTexture;
+			} else {
+				readBuffer = pEyeBuffer->m_FBO;
+				pEyeTexture = pEyeBuffer->m_pTexture;
+			}
+			// The post-processors draw into their own buffer
+			m_overscan.activate();
+
+			blitParams.srcY0 = 0;
+			blitParams.srcY1 = min((s32)(srcPartHeight * srcScaleY), (s32)pEyeBuffer->m_pTexture->realHeight);
+			blitParams.srcWidth = pEyeTexture->realWidth;
+			blitParams.srcHeight = pEyeTexture->realHeight;
+			blitParams.dstY0 = vOffset + (s32)(nextY0 * dstScaleY);
+			blitParams.dstY1 = vOffset + (s32)(nextY1 * dstScaleY);
+			blitParams.tex[0] = pEyeTexture;
+			blitParams.readBuffer = readBuffer;
+
+			drawer.copyTexturedRect(blitParams);
+		}
+
+		gfxContext.bindFramebuffer(bufferTarget::READ_FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
+		m_overscan.draw(vFullHeight, rdpRes.vi_ispal, eyeOffset, static_cast<u32>(eyeWidth) * eyes, eye == 0);
 	}
 
-	gfxContext.bindFramebuffer(bufferTarget::READ_FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
-	m_overscan.draw(vFullHeight, rdpRes.vi_ispal);
-
+	if (config.stereo.mode != Config::stereoOff)
+		gSPStereoEndFrame();
+	// Immersive mode: tell the headset which head pose this picture was drawn for
+	gSPImmersivePresent(pBuffer->m_startAddress);
 	wnd.swapBuffers();
 	if (m_pCurrent != nullptr) {
 		gfxContext.bindFramebuffer(bufferTarget::DRAW_FRAMEBUFFER, m_pCurrent->m_FBO);
