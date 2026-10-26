@@ -17,6 +17,7 @@
  */
 
 #include "rdp_emit_f3d.h"
+#include "rdp_emit_f3dtri.h"
 #include "rdp_emit_f3dex2.h"
 #include "rdp_emit_bridge.h"
 #include "rdp_emit_frontend.h"
@@ -651,6 +652,102 @@ void f3d_set_variant(int doom64)
     rsp_set_clip_lerp_l3dex(s_variant_d64);
 }
 void f3d_set_line_variant(int line) { s_variant_line = line ? 1 : 0; }
+/* the build's G_RDPHALF_1 (0xB4) handler stores perspNorm */
+static int s_half1_perspnorm = 0;
+void f3d_set_half1_perspnorm(int on) { s_half1_perspnorm = on ? 1 : 0; }
+int f3d_ucode_half1_perspnorm(const unsigned char *rdram, unsigned int rdram_size,
+                              unsigned int ud, unsigned int ut)
+{
+    unsigned int handler, off;
+    if (rdram == 0 || ud == 0 || ut == 0 || ud > rdram_size || 0xe0u > rdram_size - ud
+        || ut > rdram_size || 8u > rdram_size - ut || rd32(rdram, ut + 4u) != 0x201d0110u)
+        return 0;
+    /* the data segment lands at DMEM 0, so its dispatch table entry for
+     * 0xB4 sits at data + 0xdc and names the handler's IMEM address; the
+     * text lands at IMEM 0x080 */
+    handler = rd32(rdram, ud + 0xdcu) & 0xffffu;
+    if (handler < 0x1080u || handler > 0x1ff8u)
+        return 0;
+    off = handler - 0x1080u;
+    if (off > rdram_size - ut || 8u > rdram_size - ut - off)
+        return 0;
+    /* j dispatch; sh t8,2(sp) */
+    return (rd32(rdram, ut + off) & 0xfc000000u) == 0x08000000u
+        && rd32(rdram, ut + off + 4u) == 0xa7b80002u;
+}
+/* Rare's GBI 1 build (GoldenEye 007, Perfect Dark) clips in an overlay
+ * that seeds its list with the triangle reversed (four halfword stores of
+ * the vertex pointers, then the list base and length set up), rotates
+ * each plane's output to start where the polygon re-enters, and fans
+ * ascending pairs back into the writer reversed. Its clip divide is the
+ * GBI 1 refinement, identified by its opening and closing vector ops.
+ * Returns 1 for the fan, 2 for the fan and that divide. */
+int f3d_ucode_rare_clip(const unsigned char *rdram, unsigned int rdram_size,
+                        unsigned int ut)
+{
+    unsigned int at, k;
+    if (rdram == 0 || ut == 0 || ut > rdram_size || 0x1800u > rdram_size - ut)
+        return 0;
+    for (at = 0; at + 28u <= 0x1800u; at += 4u)
+    {
+        unsigned int base = rd32(rdram, ut + at) & 0xffffu;
+        if (base > 0xfc0u || (base & 7u)
+            || rd32(rdram, ut + at)       != (0xa4030000u | base)
+            || rd32(rdram, ut + at + 4u)  != (0xa4020000u | (base + 2u))
+            || rd32(rdram, ut + at + 8u)  != (0xa4010000u | (base + 4u))
+            || rd32(rdram, ut + at + 12u) != (0xa4000000u | (base + 6u))
+            || rd32(rdram, ut + at + 16u) != 0x34070db8u
+            || rd32(rdram, ut + at + 20u) != (0x341e0000u | base)
+            || rd32(rdram, ut + at + 24u) != 0x3406000cu)
+            continue;
+        for (k = 0; k + 32u <= 0x1800u; k += 4u)
+            if (rd32(rdram, ut + k)       == 0x4b7d5ef2u
+                && rd32(rdram, ut + k + 4u)  == 0x4b7c5eb1u
+                && rd32(rdram, ut + k + 20u) == 0x4b5fd686u
+                && rd32(rdram, ut + k + 24u) == 0x4b5fdecfu
+                && rd32(rdram, ut + k + 28u) == 0x4b1ffe8eu)
+                return 2;
+        return 1;
+    }
+    return 0;
+}
+
+/* The early GBI 1 lighting (GoldenEye 007, Perfect Dark), by its code:
+ * 1 for the per-light rounded colour loop (its opening four vector ops),
+ * 2 when the direction normalizer is the truncating, x64-scaled one too. */
+int f3d_ucode_legacy_lighting(const unsigned char *rdram, unsigned int rdram_size,
+                              unsigned int ut)
+{
+    unsigned int at;
+    int mode = 0;
+    if (rdram == 0 || ut == 0 || ut > rdram_size || 0x1800u > rdram_size - ut)
+        return 0;
+    for (at = 0; at + 16u <= 0x1800u; at += 4u)
+        if (rd32(rdram, ut + at) == 0x4a052180u
+            && rd32(rdram, ut + at + 4u) == 0x4a6630d0u
+            && rd32(rdram, ut + at + 8u) == 0x4ac61990u
+            && rd32(rdram, ut + at + 12u) == 0x4a8639c0u)
+        {
+            mode = 1;
+            break;
+        }
+    for (at = 0; at + 16u <= 0x1800u; at += 4u)
+        if (rd32(rdram, ut + at) == 0x4b9f2940u
+            && rd32(rdram, ut + at + 4u) == 0x4a856186u
+            && rd32(rdram, ut + at + 8u) == 0x4aa5698eu
+            && rd32(rdram, ut + at + 12u) == 0x4ac5718eu)
+            return 2;
+    return mode;
+}
+
+static int s_clip_rare = 0;
+void f3d_set_clip_rare(int mode)
+{
+    s_clip_rare = mode;
+    if (mode == 2)
+        rsp_set_clip_lerp_gbi1();
+}
+
 void f3d_set_variant_wr64(int wr64) { s_variant_wr64 = wr64 ? 1 : 0; }
 static int s_variant_wo64 = 0;
 void f3d_set_variant_wo64(int wo64)
@@ -776,6 +873,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * triangles with the correct fan). */
         if (s_variant_d64)
             gsp->clip_fan_first = 1;
+        if (s_clip_rare)
+            gsp->clip_fan_first = 4;
         rsp_tri_set_d64_sort(s_variant_d64 ? 1 : 0);
         if (s_variant_wo64)
         {
@@ -922,8 +1021,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 
         case F3D_TRI1:
         {
-            int32_t cw[GSP_TRI_CMD_WORDS];
-            int a, b, c, nc;
+            int a, b, c;
             f3d_sync_persp_tex();
             /* GoldenEye/Perfect Dark (Rare's F3DEX-derived GBI1) store the
              * G_TRI1 vertex index as slot*10 -- the value the microcode's
@@ -942,15 +1040,19 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 b = (int)((w1 >>  8) & 0xff) / s;
                 c = (int)((w1 >>  0) & 0xff) / s;
             }
-            nc = gsp_triangle(gsp, cw, a, b, c, s_textured, s_zbuffered);
-            if (nc > 0) rdp_fifo_append(fifo, cw, nc);
+            /* GoldenEye's handler takes the flat-shade colour from the
+             * command vertex the flag byte names (Mario Kart 64's, and
+             * every other build's, from the first) */
+            gsp->viewport.f3d_flat_vtx =
+                gsp->viewport.f3d_tri_rev == F3D_TRI_REV_B
+                    ? (int)((w1 >> 24) & 0xffu) % 3 : 0;
+            gsp_triangle_fifo(gsp, fifo, a, b, c, s_textured, s_zbuffered);
+            gsp->viewport.f3d_flat_vtx = 0;
             break;
         }
 
         case F3D_TRI2:
         {
-            int32_t cw[GSP_TRI_CMD_WORDS];
-            int nc;
             f3d_sync_persp_tex();
             if (s_variant_f3dex)
             {
@@ -980,9 +1082,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 {
                     if (tri[i][0] == tri[i][1] && tri[i][0] == tri[i][2])
                         continue;
-                    nc = gsp_triangle(gsp, cw, tri[i][0], tri[i][1], tri[i][2],
-                                      s_textured, s_zbuffered);
-                    if (nc > 0) rdp_fifo_append(fifo, cw, nc);
+                    gsp_triangle_fifo(gsp, fifo, tri[i][0], tri[i][1],
+                                      tri[i][2], s_textured, s_zbuffered);
                 }
             }
             else if (s_variant_d64)
@@ -1010,10 +1111,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                      * order and flip the second triangle's winding; drawn
                      * with the walker's order the diagonal double-blends
                      * into a dim streak across the glyphs. */
-                    nc = gsp_triangle(gsp, cw, c1, b1, a1, s_textured, s_zbuffered);
-                    if (nc > 0) rdp_fifo_append(fifo, cw, nc);
-                    nc = gsp_triangle(gsp, cw, a0, b0, c0, s_textured, s_zbuffered);
-                    if (nc > 0) rdp_fifo_append(fifo, cw, nc);
+                    gsp_triangle_fifo(gsp, fifo, c1, b1, a1, s_textured, s_zbuffered);
+                    gsp_triangle_fifo(gsp, fifo, a0, b0, c0, s_textured, s_zbuffered);
                 }
                 else
                 {
@@ -1029,10 +1128,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                      * the frame moves from disagreeing with the
                      * interpreter to agreeing with it, and Hexen's title
                      * screen goes from 192 differing pixels to none. */
-                    nc = gsp_triangle(gsp, cw, a1, b1, c1, s_textured, s_zbuffered);
-                    if (nc > 0) rdp_fifo_append(fifo, cw, nc);
-                    nc = gsp_triangle(gsp, cw, a0, b0, c0, s_textured, s_zbuffered);
-                    if (nc > 0) rdp_fifo_append(fifo, cw, nc);
+                    gsp_triangle_fifo(gsp, fifo, a1, b1, c1, s_textured, s_zbuffered);
+                    gsp_triangle_fifo(gsp, fifo, a0, b0, c0, s_textured, s_zbuffered);
                 }
             }
             break;
@@ -1065,12 +1162,45 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int b = (int)((w1 >> 16) & 0xff) / s;
             int c = (int)((w1 >>  8) & 0xff) / s;
             int d = (int)((w1 >>  0) & 0xff) / s;
-            int32_t cw[GSP_TRI_CMD_WORDS];
             int nc;
-            nc = gsp_triangle(gsp, cw, a, b, c, s_textured, s_zbuffered);
-            if (nc > 0) rdp_fifo_append(fifo, cw, nc);
-            nc = gsp_triangle(gsp, cw, a, c, d, s_textured, s_zbuffered);
-            if (nc > 0) rdp_fifo_append(fifo, cw, nc);
+            if (gsp->viewport.f3d_tri_rev == F3D_TRI_REV_A
+                && a < GSP_MAX_VERTICES && b < GSP_MAX_VERTICES
+                && c < GSP_MAX_VERTICES && d < GSP_MAX_VERTICES)
+            {
+                /* Mario Kart 64's handler (text 0x244) cuts the quad along
+                 * the diagonal with the smaller screen-y span: b-d when
+                 * |y(b) - y(d)| <= |y(c) - y(a)|, drawing (b, c, d) then
+                 * (d, a, b); a-c otherwise, drawing (b, c, a) then
+                 * (d, a, c). The flat colour comes from b. The vertex
+                 * order decides the setup's tie-breaks between vertices of
+                 * equal y, so any other order changes the edge words. */
+                int32_t dy0 = (gsp->vtx[b].scr_y >> 14) - (gsp->vtx[d].scr_y >> 14);
+                int32_t dy1 = (gsp->vtx[c].scr_y >> 14) - (gsp->vtx[a].scr_y >> 14);
+                int t1 = d, t2 = b, fv = 2;
+                if (dy0 < 0) dy0 = -dy0;
+                if (dy1 < 0) dy1 = -dy1;
+                if (dy0 > dy1)
+                {
+                    t1 = a;
+                    t2 = c;
+                    fv = 0;
+                }
+                gsp->viewport.f3d_flat_vtx = 0;
+                nc = gsp_triangle_fifo(gsp, fifo, b, c, t1, s_textured, s_zbuffered);
+                /* a first half culled on its face leaves ra zero (writer
+                 * exit 0xfa0) and the handler returns without the second;
+                 * a trivial reject, a zero area or a clip keeps it */
+                if (nc == 0 && rsp_tri_f3d_face_culled())
+                    break;
+                /* b is not a vertex of the second half on the a-c cut;
+                 * every Mario Kart 64 quad is smooth shaded */
+                gsp->viewport.f3d_flat_vtx = fv;
+                gsp_triangle_fifo(gsp, fifo, d, a, t2, s_textured, s_zbuffered);
+                gsp->viewport.f3d_flat_vtx = 0;
+                break;
+            }
+            gsp_triangle_fifo(gsp, fifo, a, b, c, s_textured, s_zbuffered);
+            gsp_triangle_fifo(gsp, fifo, a, c, d, s_textured, s_zbuffered);
             }
             break;
         }
@@ -1154,6 +1284,10 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 ts = gsp->tex_scale_t;
             }
             gsp_set_texture(gsp, ss, ts, tile, level, gsp->tex_w, gsp->tex_h);
+            /* the Fast3D revision B triangle write clamps its depth
+             * coefficients against this command's parameter byte (the
+             * microcode keeps w0 whole at its state block) */
+            gsp->viewport.f3d_zclamp = (int)((w0 >> 16) & 0xffu);
             break;
         }
 
@@ -1284,7 +1418,9 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 break;
             }
             case F3D_MW_PERSPNORM:
-                gsp_set_persp_norm(gsp, w1 & 0xffffu);
+                /* not perspNorm in a build whose 0xB4 handler stores it */
+                if (!s_half1_perspnorm)
+                    gsp_set_persp_norm(gsp, w1 & 0xffffu);
                 break;
             case F3D_MW_POINTS:
             {
@@ -1358,8 +1494,14 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * carry matrix and other state commands the microcode never
              * executes. */
             {
-                int v0 = (int)(((w0 >> 16) & 0xffu) / 2u);
-                int vn = (int)((w1 & 0xffu) / 2u);
+                /* F3DEX GBI 1 passes the indices doubled; Fast3D and the
+                 * builds keeping its old 0xB4 ABI (F3DEX 0.95) pass vstart
+                 * times the 40-byte vertex size and (vend + 1) * 40 */
+                int f3dex_form = s_variant_d64 && !s_half1_perspnorm;
+                int v0 = f3dex_form ? (int)((w0 & 0xffffu) / 2u)
+                                    : (int)((w0 & 0xffffu) / 40u);
+                int vn = f3dex_form ? (int)((w1 & 0xffffu) / 2u)
+                                    : (int)(w1 / 40u) - 1;
                 if (gsp_culldl_test(gsp, v0, vn))
                     running = 0;
             }
@@ -1589,7 +1731,10 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * generated vertices (bottom-edge clips land at 240.0 instead
              * of the microcode's 239.75). Blast Corps' Fast3D line build
              * keeps the old-F3D bare-RDPHALF_1 perspNorm convention. */
-            if (!s_variant_d64)
+            /* Early F3DEX (Mario Kart 64's 0.95) keeps that store despite
+             * the newer encoding; ignoring it leaves perspNorm at 0xffff
+             * and coplanar track decals fail the depth test. */
+            if (!s_variant_d64 || s_half1_perspnorm)
                 gsp_set_persp_norm(gsp, w1 & 0xffffu);
             break;
 

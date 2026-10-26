@@ -3,12 +3,28 @@
 
 #include <stdint.h>
 
+/* S2DEX 1.x object writers; see rdp_emit_rsp.c */
+int rsp_s2dex_rect_axis(int obj, int scale, int extent, int base_scale,
+                        int trans, const int16_t c[6], int flip,
+                        int clip_min, int clip_max, int frac_scale,
+                        int truncate, int out[4]);
+void rsp_s2dex_sprite_corners(int16_t out[4][4], const int obj[6],
+                              const int32_t matrix[6], unsigned int mode,
+                              unsigned int flags);
+void rsp_s2dex_sprite_triangle(int32_t packet[24], const int16_t h[4],
+                               const int16_t m[4], const int16_t l[4],
+                               unsigned int tile);
 int32_t rsp_rcp32(int32_t in32);
 int32_t rsp_rcp32_dp(int32_t in32);
 int32_t rsp_rcp16(int32_t in16);
 int32_t rsp_rsq32(int32_t in32);
 void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
                             const int32_t dir[3], int32_t out[3]);
+void rsp_light_dir_xfrm_legacy(const int32_t mv[4][4],
+                               const int32_t dir[3], int32_t out[3]);
+void rsp_light_vtx_legacy(const int32_t n[3], const int32_t amb[3],
+                          const int32_t (*rgb)[3], const int32_t (*dirs)[3],
+                          int num, int32_t out[3]);
 void rsp_zsort_light_xfrm(const uint16_t mi[3][4], const uint16_t mf[3][4],
                           const int32_t dir[3], unsigned char out[4]);
 int32_t rsp_clip_scale_w(int32_t w, int ratio);
@@ -16,6 +32,8 @@ void rsp_set_clip_lerp_204h(int on);
 void rsp_set_vtx_invw_2rd(int on);
 void rsp_set_tri_attr_rs(int on);
 void rsp_set_vtx_invw_raw(int on);
+/* Fast3D vertex write model (reciprocal refinement and screen clamps). */
+void rsp_set_vtx_f3d(int on, int32_t clamp_lo, int32_t clamp_hi);
 void rsp_set_vtx_y_round(int on);
 void rsp_set_vtx_x_round(int on);
 void rsp_set_vtx_z_quant(int on);
@@ -25,6 +43,7 @@ void rsp_set_persp_skip(int on);
 void rsp_set_attr_lowp(int on);
 void rsp_set_clip_lerp_wo64(int on);
 void rsp_set_clip_lerp_l3dex(int on);
+void rsp_set_clip_lerp_gbi1(void);
 void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
                    const int16_t cr[4],
                    const int16_t on_attr[8], const int16_t off_attr[8],
@@ -32,6 +51,17 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
 void rsp_texgen(const int32_t n[3], const int32_t l0[3], const int32_t l1[3],
                 int linear, int32_t *s_out, int32_t *t_out);
 int32_t rsp_light_dirdot(const int32_t n[3], const int32_t d[3]);
+/* Conker's F3DEXBG vertex lighting; see rdp_emit_rsp.c */
+void rsp_cbfd_light(const int32_t clip[4], const int32_t coord[16],
+                    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+                    const int32_t *attenuation, int num,
+                    const int32_t source[3], int32_t out[3]);
+void rsp_cbfd_light_normal(const int32_t clip[4], const int32_t coord[16],
+                           const int32_t (*positions)[4], const int32_t (*rgb)[3],
+                           const int32_t *attenuation, int num,
+                           const int32_t source[3], const int32_t normal[3],
+                           const int32_t (*directions)[3], int positional,
+                           int32_t out[3]);
 void rsp_light_fold1(int32_t lt[3], const int32_t rgb[3], int32_t d);
 int32_t rsp_light_point_factor(const int32_t mv[4][4], const int32_t n[3],
                                const int32_t vtx[3], const int32_t pos[3],
@@ -81,6 +111,10 @@ typedef struct RspTriVtx
     int32_t  invw;      /* VTX_INV_W 32-bit value (rsp_vtx_invw) */
     int32_t  pw;        /* perspNorm'd w (the divide input; Rogue
                            Squadron's texture normalizer folds these) */
+    int32_t  cx, cy, cz;/* clip-space x, y, z, s15.16 (Fast3D clipper) */
+    int32_t  cw;        /* clip-space w, s15.16 (the Fast3D texture
+                           weights scale it by perspNorm) */
+    int32_t  f3d_flags; /* Fast3D vertex record clip-flag halfword */
     int      flat2d;    /* raw attribute path: skip the perspective
                            normalizer and colour rounding (Fighting
                            Force 64's 2D overlay microcode) */
@@ -94,6 +128,10 @@ int rsp_line_write(int32_t *cmd, const RspTriVtx *e0, const RspTriVtx *e1,
 void rsp_tri_set_rs_sort(int on);
 void rsp_tri_set_zboss_attr(int on);
 void rsp_tri_set_d64_sort(int on);
+/* textured triangles take the DIV-table texture normalizer and latched
+ * gradient products of the F3DEX2 builds that use them */
+void rsp_tri_set_texrecip(int on);
+int rsp_tri_texrecip(void);
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
                   const RspTriVtx *v3c,

@@ -29,6 +29,7 @@
 #include "device/pif/pif.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/mi/mi_controller.h"
+#include "device/rcp/pi/pi_controller.h"
 #include "device/rcp/ri/ri_controller.h"
 #include "device/rdram/rdram.h"
 #include "osal/preproc.h"
@@ -53,21 +54,26 @@ static int validate_dma(struct si_controller* si, uint32_t reg)
 static void copy_pif_rdram(struct si_controller* si)
 {
     size_t i;
-    /* DRAM address must be word-aligned */
-    uint32_t dram_addr = si->regs[SI_DRAM_ADDR_REG] & ~UINT32_C(3);
+    /* 64-bit aligned, inside the 24-bit RDRAM window */
+    uint32_t dram_addr = si->regs[SI_DRAM_ADDR_REG] & UINT32_C(0xfffff8);
 
     uint32_t* pif_ram = (uint32_t*)si->pif->ram;
-    uint32_t* dram = (uint32_t*)(&si->ri->rdram->dram[rdram_dram_address(dram_addr)]);
+    struct rdram* rdram = si->ri->rdram;
 
-    if (si->dma_dir == SI_DMA_WRITE) {
-        for(i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
-            pif_ram[i] = fromhl(dram[i]);
-        }
+    /* words past the installed RDRAM read as zero and drop writes */
+    for (i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
+        uint32_t addr = (dram_addr + (uint32_t)i * 4) & UINT32_C(0xffffff);
+
+        if (si->dma_dir == SI_DMA_WRITE)
+            pif_ram[i] = (addr < rdram->dram_size)
+                       ? fromhl(rdram->dram[rdram_dram_address(addr)]) : 0;
+        else if (si->dma_dir == SI_DMA_READ && addr < rdram->dram_size)
+            rdram->dram[rdram_dram_address(addr)] = tohl(pif_ram[i]);
     }
-    else if (si->dma_dir == SI_DMA_READ) {
-        for(i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
-            dram[i] = tohl(pif_ram[i]);
-        }
+
+    if (si->dma_dir == SI_DMA_READ) {
+        invalidate_r4300_cached_code(si->mi->r4300, R4300_KSEG0 + dram_addr, PIF_RAM_SIZE);
+        invalidate_r4300_cached_code(si->mi->r4300, R4300_KSEG1 + dram_addr, PIF_RAM_SIZE);
     }
 }
 
@@ -82,7 +88,41 @@ static void dma_si_write(struct si_controller* si)
 
     cp0_update_count(si->mi->r4300);
     si->regs[SI_STATUS_REG] |= SI_STATUS_DMA_BUSY;
-    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si->dma_duration + add_random_interrupt_time(si->mi->r4300));
+    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si_dma_duration(si, 0) + add_random_interrupt_time(si->mi->r4300));
+}
+
+/* SI DMA duration in count cycles from the joybus command list: a fixed
+ * cost per direction plus, for the read back, each channel's command
+ * (longer with a device attached) and each skip or terminator byte.
+ * A per-game SiDmaDuration in the ROM database still takes priority. */
+unsigned int si_dma_duration(const struct si_controller* si, int read)
+{
+    unsigned int clocks = read ? 13600 : 4065;
+
+    if (!g_dma_bus_timing || si->dma_duration != SI_DMA_DURATION_DEFAULT)
+        return si->dma_duration;
+
+    if (read) {
+        unsigned int offset = 0, channel = 0;
+        const uint8_t* ram = si->pif->ram;
+
+        while (offset < PIF_RAM_SIZE && channel < 5) {
+            unsigned int send = ram[offset++];
+            unsigned int receive;
+
+            if (send == 0xfe) { clocks += 1420; break; }
+            if (send == 0xff) { clocks += 1420; continue; }
+            if (send == 0 || send == 0xfd) { clocks += 1420; ++channel; continue; }
+            if (offset >= PIF_RAM_SIZE)
+                break;
+            receive = ram[offset++] & 63;
+            offset += (send & 63) + receive;
+            clocks += (channel == 4) ? 20000
+                    : (si->pif->channels[channel].jbd != NULL) ? 22000 : 18000;
+            ++channel;
+        }
+    }
+    return (clocks * 3 + 3) / 4;
 }
 
 static void dma_si_read(struct si_controller* si)
@@ -96,7 +136,7 @@ static void dma_si_read(struct si_controller* si)
 
     cp0_update_count(si->mi->r4300);
     si->regs[SI_STATUS_REG] |= SI_STATUS_DMA_BUSY;
-    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si->dma_duration + add_random_interrupt_time(si->mi->r4300));
+    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si_dma_duration(si, 1) + add_random_interrupt_time(si->mi->r4300));
 }
 
 void init_si(struct si_controller* si,

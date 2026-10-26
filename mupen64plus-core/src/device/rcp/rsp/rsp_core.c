@@ -41,6 +41,23 @@ int g_rsp_task_consumes_dp;
 #include "plugin/plugin.h"
 #include "api/callbacks.h"
 
+/* An RSP DMA into RDRAM can overwrite code the CPU recompiler has already
+ * translated, as a PI DMA can.  A row that runs off the end of RDRAM wraps
+ * to its start. */
+static void sp_dma_invalidate(struct rsp_core* sp, uint32_t start, uint32_t length)
+{
+    uint32_t first = 0x800000 - start;
+
+    if (first > length)
+        first = length;
+    invalidate_r4300_cached_code(sp->mi->r4300, R4300_KSEG0 + start, first);
+    invalidate_r4300_cached_code(sp->mi->r4300, R4300_KSEG1 + start, first);
+    if (length > first) {
+        invalidate_r4300_cached_code(sp->mi->r4300, R4300_KSEG0, length - first);
+        invalidate_r4300_cached_code(sp->mi->r4300, R4300_KSEG1, length - first);
+    }
+}
+
 static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
 {
     unsigned int i,j;
@@ -49,17 +66,22 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
 
     unsigned int length = ((l & 0xfff) | 7) + 1;
     unsigned int count = ((l >> 12) & 0xff) + 1;
-    unsigned int skip = ((l >> 20) & 0xfff);
+    unsigned int skip = ((l >> 20) & 0xff8);
 
+    /* the transfer stays inside the 4 KiB bank bit 12 picks; the skip
+     * falls between rows, not after the last one */
+    unsigned int bank = dma->memaddr & 0x1000;
     unsigned int memaddr = dma->memaddr & 0xff8;
     unsigned int dramaddr = dma->dramaddr & 0xfffff8;
 
-    unsigned char *spmem = (unsigned char*)sp->mem + (dma->memaddr & 0x1000);
+    unsigned char *spmem = (unsigned char*)sp->mem + bank;
     unsigned char *dram = (unsigned char*)sp->ri->rdram->dram;
 
     if (dma->dir == SP_DMA_READ)
     {
         for(j=0; j<count; j++) {
+            if (j != 0)
+                dramaddr += skip;
             for(i=0; i<length; i++) {
                 dram[(dramaddr^S8) & 0x7fffff] = spmem[(memaddr^S8) & 0xfff];
                 memaddr++;
@@ -67,16 +89,14 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
             }
             if (dramaddr <= 0x800000)
                 post_framebuffer_write(&sp->dp->fb, dramaddr - length, length);
-            dramaddr+=skip;
+            sp_dma_invalidate(sp, (dramaddr - length) & 0x7fffff, length);
         }
-
-        sp->regs[SP_MEM_ADDR_REG] = memaddr & 0xfff;
-        sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xffffff;
-        sp->regs[SP_RD_LEN_REG] = 0xff8;
     }
     else
     {
         for(j=0; j<count; j++) {
+            if (j != 0)
+                dramaddr += skip;
             if (dramaddr < 0x800000)
                 pre_framebuffer_read(&sp->dp->fb, dramaddr);
 
@@ -85,13 +105,15 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
                 memaddr++;
                 dramaddr++;
             }
-            dramaddr+=skip;
         }
-
-        sp->regs[SP_MEM_ADDR_REG] = memaddr & 0xfff;
-        sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xffffff;
-        sp->regs[SP_RD_LEN_REG] = 0xff8;
     }
+
+    /* both length registers read back the finished transfer: the skip,
+     * a zero count and a 0xff8 length */
+    sp->regs[SP_MEM_ADDR_REG] = bank | (memaddr & 0xff8);
+    sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xfffff8;
+    sp->regs[SP_RD_LEN_REG] = (l & 0xff800000) | 0xff8;
+    sp->regs[SP_WR_LEN_REG] = (l & 0xff800000) | 0xff8;
 
     /* schedule end of dma event */
     cp0_update_count(sp->mi->r4300);
@@ -208,7 +230,10 @@ static void update_sp_status(struct rsp_core* sp, uint32_t w)
     if ((w & 0x1800000) == 0x800000) sp->regs[SP_STATUS_REG] &= ~SP_STATUS_SIG7;
     if ((w & 0x1800000) == 0x1000000) sp->regs[SP_STATUS_REG] |= SP_STATUS_SIG7;
 
-    if (sp->rsp_task_locked && (get_event(&sp->mi->r4300->cp0.q, SP_INT))) return;
+    /* A task that has run still owns the SP until its SP_INT event
+     * delivers the completion (and re-exposes HALT/BROKE).  A CLR_HALT or
+     * CLR_BROKE landing before that must not run the same task again. */
+    if (get_event(&sp->mi->r4300->cp0.q, SP_INT)) return;
     if (!((w & 0x3) == 1) && !(w & 0x4) && !sp->rsp_task_locked)
         return;
 
@@ -299,6 +324,12 @@ void write_rsp_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mas
 
     switch(reg)
     {
+    case SP_MEM_ADDR_REG:
+        sp->regs[SP_MEM_ADDR_REG] &= 0x1ff8;
+        break;
+    case SP_DRAM_ADDR_REG:
+        sp->regs[SP_DRAM_ADDR_REG] &= 0xfffff8;
+        break;
     case SP_RD_LEN_REG:
         fifo_push(sp, SP_DMA_WRITE);
         break;
@@ -346,19 +377,56 @@ void write_rsp_regs2(void* opaque, uint32_t address, uint32_t value, uint32_t ma
 static int l_zb_shadow_armed = 1;
 static unsigned l_zb_fresh_n;
 
+/* Debug switches for the oracle tools, read from the environment once
+ * rather than on every task. */
+static struct
+{
+    int read;
+    int gfx_cap_set;
+    unsigned gfx_cap;          /* HARNESS_GFX_CAP: graphics task to dump */
+    const char *gfx_cap_file;  /* HARNESS_GFX_CAP_FILE */
+    int zb_shadow_set;
+    unsigned zb_shadow;        /* ZB_SHADOW: fresh BOSS task to shadow */
+    int zb_end_set;
+    unsigned zb_end;           /* ZB_SHADOW_END: shadow at task end */
+} l_rsp_env;
+
+static void rsp_read_env(void)
+{
+    const char *v;
+
+    if (l_rsp_env.read)
+        return;
+    l_rsp_env.read = 1;
+    if ((v = getenv("HARNESS_GFX_CAP")) != NULL) {
+        l_rsp_env.gfx_cap_set = 1;
+        l_rsp_env.gfx_cap = (unsigned)strtoul(v, NULL, 0);
+        l_rsp_env.gfx_cap_file = getenv("HARNESS_GFX_CAP_FILE");
+    }
+    if ((v = getenv("ZB_SHADOW")) != NULL) {
+        l_rsp_env.zb_shadow_set = 1;
+        l_rsp_env.zb_shadow = (unsigned)strtoul(v, NULL, 0);
+    }
+    if ((v = getenv("ZB_SHADOW_END")) != NULL) {
+        l_rsp_env.zb_end_set = 1;
+        l_rsp_env.zb_end = (unsigned)strtoul(v, NULL, 0);
+    }
+}
+
 void do_SP_Task(struct rsp_core* sp)
 {
     uint32_t save_pc = sp->regs2[SP_PC_REG] & ~0xfff;
 
     uint32_t sp_delay_time;
 
+    rsp_read_env();
+
     if (sp->mem[0xfc0/4] == 1)
     {
         {
             static unsigned g1;
-            const char *gc = getenv("HARNESS_GFX_CAP");
-            if (gc && g1 == (unsigned)strtoul(gc, NULL, 0)) {
-                const char *fn = getenv("HARNESS_GFX_CAP_FILE");
+            if (l_rsp_env.gfx_cap_set && g1 == l_rsp_env.gfx_cap) {
+                const char *fn = l_rsp_env.gfx_cap_file;
                 FILE *f = fopen(fn ? fn : "/tmp/gfx_rdram.bin", "wb");
                 if (f) { fwrite(sp->ri->rdram->dram, 1, 0x800000, f);
                          fwrite(sp->mem, 1, 0x2000, f); fclose(f); }
@@ -371,16 +439,16 @@ void do_SP_Task(struct rsp_core* sp)
          * run the HLE walker read-only over the same state and dump its
          * stream for oracle comparison (env ZB_SHADOW). Freshness =
          * first gfx dispatch after the previous task broke. */
-        if (getenv("ZB_SHADOW") && l_zb_shadow_armed)
+        if (l_rsp_env.zb_shadow_set && l_zb_shadow_armed)
         {
             extern int angrylion_zboss_shadow(unsigned char *rdram,
                                               unsigned int rdram_size,
                                               unsigned char *dmem);
-            unsigned want = (unsigned)strtoul(getenv("ZB_SHADOW"), NULL, 0);
+            unsigned want = l_rsp_env.zb_shadow;
             l_zb_shadow_armed = 0;
             l_zb_fresh_n++;
             if ((want == 0 || l_zb_fresh_n == want)
-                && !getenv("ZB_SHADOW_END"))
+                && !l_rsp_env.zb_end_set)
                 angrylion_zboss_shadow((unsigned char*)sp->ri->rdram->dram,
                                        0x800000u,
                                        (unsigned char*)sp->mem);
@@ -544,10 +612,9 @@ void do_SP_Task(struct rsp_core* sp)
     }
     if ((sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE)))
     {
-        if (getenv("ZB_SHADOW_END") && !l_zb_shadow_armed
+        if (l_rsp_env.zb_end_set && !l_zb_shadow_armed
             && sp->mem[0xfc0/4] == 1
-            && l_zb_fresh_n == (unsigned)strtoul(getenv("ZB_SHADOW_END"),
-                                                 NULL, 0))
+            && l_zb_fresh_n == l_rsp_env.zb_end)
         {
             extern int angrylion_zboss_shadow(unsigned char *rdram,
                                               unsigned int rdram_size,

@@ -30,6 +30,8 @@
 #include "api/callbacks.h"
 #include "api/debugger.h"
 #include "api/m64p_types.h"
+#include "device/aleck64/aleck64.h"
+#include "device/memory/m64p_memory.h"
 #include "device/r4300/r4300_core.h"
 #include "osal/preproc.h"
 
@@ -104,12 +106,30 @@ static void InterpretOpcode(struct r4300_core* r4300);
 #define FT_OF(op)      (((op) >> 16) & 0x1F)
 #define JUMP_OF(op)    ((op) & UINT32_C(0x3FFFFFF))
 
+/* Whether the word at a delay slot address is a NOP, peeked without
+ * fetching it: an unmapped page reads as "not idle" rather than raising
+ * a TLB refill against the branch and handing back a NULL word. */
+static int idle_delay_slot_is_nop(struct r4300_core* r4300, uint32_t address)
+{
+    if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000))
+    {
+        uint32_t lut = r4300->cp0.tlb.LUT_r[address >> 12];
+        if (lut == 0)
+            return 0;
+        address = (lut & UINT32_C(0xfffff000)) | (address & UINT32_C(0xfff));
+        if (g_aleck64_enabled && address >= UINT32_C(0x80000000)
+            && address <= UINT32_C(0xc07fffff))
+            return *aleck64_fast_mem(address) == 0;
+    }
+    return *mem_base_u32(r4300->mem->base, address & UINT32_C(0x1ffffffc)) == 0;
+}
+
 /* Determines whether a relative jump in a 16-bit immediate goes back to the
  * same instruction without doing any work in its delay slot. The jump is
  * relative to the instruction in the delay slot, so 1 instruction backwards
  * (-1) goes back to the jump. */
 #define IS_RELATIVE_IDLE_LOOP(r4300, op, addr) \
-	(IMM16S_OF(op) == -1 && *fast_mem_access((r4300), (addr) + 4) == 0)
+	(IMM16S_OF(op) == -1 && idle_delay_slot_is_nop((r4300), (addr) + 4))
 
 /* Determines whether an absolute jump in a 26-bit immediate goes back to the
  * same instruction without doing any work in its delay slot. The jump is
@@ -118,7 +138,7 @@ static void InterpretOpcode(struct r4300_core* r4300);
 #define IS_ABSOLUTE_IDLE_LOOP(r4300, op, addr) \
 	(JUMP_OF(op) == ((addr) & UINT32_C(0x0FFFFFFF)) >> 2 \
 	 && ((addr) & UINT32_C(0x0FFFFFFF)) != UINT32_C(0x0FFFFFFC) \
-	 && *fast_mem_access((r4300), (addr) + 4) == 0)
+	 && idle_delay_slot_is_nop((r4300), (addr) + 4))
 
 /* These macros parse opcode fields. */
 #define rrt r4300_regs(r4300)[RT_OF(op)]
@@ -169,6 +189,10 @@ void InterpretOpcode(struct r4300_core* r4300)
 	if (op_address == NULL)
 		return;
 	uint32_t op = *op_address;
+
+	/* r0 reads as zero: instructions that target it still run for their
+	 * side effects (loads, SC, traps) and their result is dropped here */
+	r4300_regs(r4300)[0] = 0;
 
 	switch ((op >> 26) & 0x3F) {
 	case 0: /* SPECIAL prefix */
@@ -240,16 +264,14 @@ void InterpretOpcode(struct r4300_core* r4300)
 		case 30: DDIV(r4300, op); break;
 		case 31: DDIVU(r4300, op); break;
 		case 32: /* SPECIAL opcode 32: ADD */
-			if (RD_OF(op) != 0) ADD(r4300, op);
-			else                NOP(r4300, 0);
+			ADD(r4300, op);
 			break;
 		case 33: /* SPECIAL opcode 33: ADDU */
 			if (RD_OF(op) != 0) ADDU(r4300, op);
 			else                NOP(r4300, 0);
 			break;
 		case 34: /* SPECIAL opcode 34: SUB */
-			if (RD_OF(op) != 0) SUB(r4300, op);
-			else                NOP(r4300, 0);
+			SUB(r4300, op);
 			break;
 		case 35: /* SPECIAL opcode 35: SUBU */
 			if (RD_OF(op) != 0) SUBU(r4300, op);
@@ -280,16 +302,14 @@ void InterpretOpcode(struct r4300_core* r4300)
 			else                NOP(r4300, 0);
 			break;
 		case 44: /* SPECIAL opcode 44: DADD */
-			if (RD_OF(op) != 0) DADD(r4300, op);
-			else                NOP(r4300, 0);
+			DADD(r4300, op);
 			break;
 		case 45: /* SPECIAL opcode 45: DADDU */
 			if (RD_OF(op) != 0) DADDU(r4300, op);
 			else                NOP(r4300, 0);
 			break;
 		case 46: /* SPECIAL opcode 46: DSUB */
-			if (RD_OF(op) != 0) DSUB(r4300, op);
-			else                NOP(r4300, 0);
+			DSUB(r4300, op);
 			break;
 		case 47: /* SPECIAL opcode 47: DSUBU */
 			if (RD_OF(op) != 0) DSUBU(r4300, op);
@@ -402,8 +422,7 @@ void InterpretOpcode(struct r4300_core* r4300)
 		else                                             BGTZ(r4300, op);
 		break;
 	case 8: /* Major opcode 8: ADDI */
-		if (RT_OF(op) != 0) ADDI(r4300, op);
-		else                NOP(r4300, 0);
+		ADDI(r4300, op);
 		break;
 	case 9: /* Major opcode 9: ADDIU */
 		if (RT_OF(op) != 0) ADDIU(r4300, op);
@@ -436,12 +455,10 @@ void InterpretOpcode(struct r4300_core* r4300)
 	case 16: /* Coprocessor 0 prefix */
 		switch ((op >> 21) & 0x1F) {
 		case 0: /* Coprocessor 0 opcode 0: MFC0  */
-			if (RT_OF(op) != 0) MFC0(r4300, op);
-			else                NOP(r4300, 0);
+			MFC0(r4300, op);
 			break;
 		case 1: /* Coprocessor 0 opcode 1: DMFC0 */
-			if (RT_OF(op) != 0) DMFC0(r4300, op);
-			else                NOP(r4300, 0);
+			DMFC0(r4300, op);
 			break;
 		case 4: /* Coprocessor 0 opcode 4: MTC0  */
 		case 5: /* Coprocessor 0 opcode 5: DMTC0 */
@@ -469,20 +486,16 @@ void InterpretOpcode(struct r4300_core* r4300)
 	case 17: /* Coprocessor 1 prefix */
 		switch ((op >> 21) & 0x1F) {
 		case 0: /* Coprocessor 1 opcode 0: MFC1 */
-			if (RT_OF(op) != 0) MFC1(r4300, op);
-			else                NOP(r4300, 0);
+			MFC1(r4300, op);
 			break;
 		case 1: /* Coprocessor 1 opcode 1: DMFC1 */
-			if (RT_OF(op) != 0) DMFC1(r4300, op);
-			else                NOP(r4300, 0);
+			DMFC1(r4300, op);
 			break;
 		case 2: /* Coprocessor 1 opcode 2: CFC1 */
-			if (RT_OF(op) != 0) CFC1(r4300, op);
-			else                NOP(r4300, 0);
+			CFC1(r4300, op);
 			break;
 		case 3: /* Coprocessor 1 opcode 2: DCFC1  */
-			if (RT_OF(op) != 0) DCFC1(r4300, op);
-			else                NOP(r4300, 0);
+			DCFC1(r4300, op);
 			break;
 		case 4: MTC1(r4300, op); break;
 		case 5: DMTC1(r4300, op); break;
@@ -623,16 +636,13 @@ void InterpretOpcode(struct r4300_core* r4300)
 	case 18: /* Coprocessor 2 prefix */
 		switch ((op >> 21) & 0x1F) {
 		case 0: /* Coprocessor 2 opcode 0: MFC2 */
-			if (RT_OF(op) != 0) MFC2(r4300, op);
-			else                NOP(r4300, 0);
+			MFC2(r4300, op);
 			break;
 		case 1: /* Coprocessor 2 opcode 1: DMFC2 */
-			if (RT_OF(op) != 0) DMFC2(r4300, op);
-			else                NOP(r4300, 0);
+			DMFC2(r4300, op);
 			break;
 		case 2: /* Coprocessor 2 opcode 2: CFC2 */
-			if (RT_OF(op) != 0) CFC2(r4300, op);
-			else                NOP(r4300, 0);
+			CFC2(r4300, op);
 			break;
 		case 4: MTC2(r4300, op); break;
 		case 5: DMTC2(r4300, op); break;
@@ -659,52 +669,41 @@ void InterpretOpcode(struct r4300_core* r4300)
 		else                                             BGTZL(r4300, op);
 		break;
 	case 24: /* Major opcode 24: DADDI */
-		if (RT_OF(op) != 0) DADDI(r4300, op);
-		else                NOP(r4300, 0);
+		DADDI(r4300, op);
 		break;
 	case 25: /* Major opcode 25: DADDIU */
 		if (RT_OF(op) != 0) DADDIU(r4300, op);
 		else                NOP(r4300, 0);
 		break;
 	case 26: /* Major opcode 26: LDL */
-		if (RT_OF(op) != 0) LDL(r4300, op);
-		else                NOP(r4300, 0);
+		LDL(r4300, op);
 		break;
 	case 27: /* Major opcode 27: LDR */
-		if (RT_OF(op) != 0) LDR(r4300, op);
-		else                NOP(r4300, 0);
+		LDR(r4300, op);
 		break;
 	case 32: /* Major opcode 32: LB */
-		if (RT_OF(op) != 0) LB(r4300, op);
-		else                NOP(r4300, 0);
+		LB(r4300, op);
 		break;
 	case 33: /* Major opcode 33: LH */
-		if (RT_OF(op) != 0) LH(r4300, op);
-		else                NOP(r4300, 0);
+		LH(r4300, op);
 		break;
 	case 34: /* Major opcode 34: LWL */
-		if (RT_OF(op) != 0) LWL(r4300, op);
-		else                NOP(r4300, 0);
+		LWL(r4300, op);
 		break;
 	case 35: /* Major opcode 35: LW */
-		if (RT_OF(op) != 0) LW(r4300, op);
-		else                NOP(r4300, 0);
+		LW(r4300, op);
 		break;
 	case 36: /* Major opcode 36: LBU */
-		if (RT_OF(op) != 0) LBU(r4300, op);
-		else                NOP(r4300, 0);
+		LBU(r4300, op);
 		break;
 	case 37: /* Major opcode 37: LHU */
-		if (RT_OF(op) != 0) LHU(r4300, op);
-		else                NOP(r4300, 0);
+		LHU(r4300, op);
 		break;
 	case 38: /* Major opcode 38: LWR */
-		if (RT_OF(op) != 0) LWR(r4300, op);
-		else                NOP(r4300, 0);
+		LWR(r4300, op);
 		break;
 	case 39: /* Major opcode 39: LWU */
-		if (RT_OF(op) != 0) LWU(r4300, op);
-		else                NOP(r4300, 0);
+		LWU(r4300, op);
 		break;
 	case 40: SB(r4300, op); break;
 	case 41: SH(r4300, op); break;
@@ -715,27 +714,22 @@ void InterpretOpcode(struct r4300_core* r4300)
 	case 46: SWR(r4300, op); break;
 	case 47: CACHE(r4300, op); break;
 	case 48: /* Major opcode 48: LL */
-		if (RT_OF(op) != 0) LL(r4300, op);
-		else                NOP(r4300, 0);
+		LL(r4300, op);
 		break;
 	case 49: LWC1(r4300, op); break;
 	case 52: /* Major opcode 52: LLD */
-		if (RT_OF(op) != 0) LLD(r4300, op);
-		else                NOP(r4300, 0);
+		LLD(r4300, op);
 		break;
 	case 53: LDC1(r4300, op); break;
 	case 55: /* Major opcode 55: LD */
-		if (RT_OF(op) != 0) LD(r4300, op);
-		else                NOP(r4300, 0);
+		LD(r4300, op);
 		break;
 	case 56: /* Major opcode 56: SC */
-		if (RT_OF(op) != 0) SC(r4300, op);
-		else                NOP(r4300, 0);
+		SC(r4300, op);
 		break;
 	case 57: SWC1(r4300, op); break;
 	case 60: /* Major opcode 60: SCD */
-		if (RT_OF(op) != 0) SCD(r4300, op);
-		else                NOP(r4300, 0);
+		SCD(r4300, op);
 		break;
 	case 61: SDC1(r4300, op); break;
 	case 63: SD(r4300, op); break;
@@ -827,6 +821,19 @@ static int mi_window_has_delay_slot(uint32_t op)
     if (major == 0 && ((op & 0x3f) == 8 || (op & 0x3f) == 9))
         return 1;                                   /* JR, JALR */
     return 0;
+}
+
+/* Whether a store wants that window: it must be a store to MI_MODE that
+ * sets the init or EBUS test mode itself. A mode a recompiler left set
+ * earlier - its window ended early and the access the mode waited for
+ * happened in compiled code - is stale, and a later MI_MODE write that
+ * only clears the DP interrupt must not hand it the next store. Conker's
+ * Bad Fur Day writes MI_MODE that way every frame, with the IPL3's init
+ * mode still set, and lost all but one byte of a store to it. */
+int pure_interp_mi_window_wanted(uint32_t address, uint32_t value, uint32_t mask)
+{
+    return (address & UINT32_C(0x1fffffff)) == UINT32_C(0x04300000)
+        && (value & mask & UINT32_C(0x500)) != 0;
 }
 
 uint32_t pure_interp_run_mi_window(struct r4300_core* r4300, uint32_t pc)

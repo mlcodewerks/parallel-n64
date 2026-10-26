@@ -13,9 +13,11 @@
 
 #include "rdp_emit.h"
 #include <stdio.h>
+#include <string.h>
 #include "rdp_emit_bridge.h"
 #include "rdp_emit_recip.h"
 #include "rdp_emit_rsp.h"
+#include "rdp_emit_f3dtri.h"
 
 void bridge_compute_screen(const BridgeVertex *v, const BridgeViewport *vp,
                            int32_t *out_x, int32_t *out_y, int32_t *out_z,
@@ -24,86 +26,10 @@ void bridge_compute_screen(const BridgeVertex *v, const BridgeViewport *vp,
     EmitVertex tmp;
     EmitVertex *e = &tmp;
 {
-    /* Perspective divide. The RSP uses the double-precision reciprocal (VRCPL,
-     * refined from the VRCP div_ROM estimate) for the screen-coordinate divide,
-     * which is full 32-bit precision. The single VRCP estimate (rsp_recip_div)
-     * has only ~10-bit mantissa -- fine for X/Y (sub-pixel) but far too coarse
-     * for the Z plane, where near-coplanar vertices differ only in the low bits
-     * of z and the coarse reciprocal turned those differences into noise (the
-     * scrambled-depth bug). Compute the NDC with the exact full-precision divide
-     * ndc = (clip << 16) / cw (s15.16), matching VRCPL. cw>0 is guaranteed by
-     * the caller's clip/cull (degenerate and w<=0 triangles are dropped). */
-    int32_t ndcx, ndcy, ndcz;
-    if (v->cw != 0)
-    {
-        /* Saturate the s15.16 NDC instead of letting the int32 cast wrap: a
-         * vertex barely in front of the eye (tiny cw) projects to coordinates
-         * far beyond the s15.16 range, and wrapped values would masquerade as
-         * sane screen positions. */
-        int64_t nx64 = ((int64_t)v->cx << 16) / v->cw;
-        int64_t ny64 = ((int64_t)v->cy << 16) / v->cw;
-        int64_t nz64 = ((int64_t)v->cz << 16) / v->cw;
-        int64_t lim = (int64_t)1 << 30;
-        if (nx64 >  lim) nx64 =  lim;
-        if (nx64 < -lim) nx64 = -lim;
-        if (ny64 >  lim) ny64 =  lim;
-        if (ny64 < -lim) ny64 = -lim;
-        if (nz64 >  lim) nz64 =  lim;
-        if (nz64 < -lim) nz64 = -lim;
-        ndcx = (int32_t)nx64;
-        ndcy = (int32_t)ny64;
-        ndcz = (int32_t)nz64;
-    }
-    else
-    {
-        ndcx = ndcy = ndcz = 0;
-    }
-
-    e->x = (int32_t)(((int64_t)ndcx * vp->vscale_x) >> 16) + vp->vtrans_x;
-    /* NDC +y points up (guPerspective), screen y grows downward and the Vp
-     * vscale[1] is stored positive (View_ViewportToVp: height*2), so the RSP
-     * screen map negates the y term: y = vtrans - ndc_y * vscale. Verified
-     * against the cxd4 stream (single-pass triangle y sets match exactly). */
-    e->y = vp->vtrans_y - (int32_t)(((int64_t)ndcy * vp->vscale_y) >> 16);
-
-    /* The RSP stores vertex screen coordinates as S13.2 -- quarter-pixel
-     * precision -- and ALL of its edge and attribute setup happens on the
-     * quantized values. Keeping the full s15.16 here made the emitted edge
-     * slopes inconsistent with the .2-quantized YH/YM/YL fields the
-     * rasterizer walks from (up to ~6% on short edges), so silhouette
-     * edges overshot their true vertices by up to half a pixel: on OoT
-     * actors a closer surface leaked single-pixel runs past its boundary
-     * (hair past the hat/face seam -- the in-game "streak" artifact).
-     * Truncate to the .25 grid before any setup; the oracle's coefficient
-     * sets (xh == xm at the shared top vertex, dxm == (xl-xh)/(ym-yh)
-     * exactly over the quantized deltas) confirm the RSP convention. */
-    e->x = (int32_t)((uint32_t)e->x & ~0x3fffu);
-    e->y = (int32_t)((uint32_t)e->y & ~0x3fffu);
-    e->z = (int32_t)(((int64_t)ndcz * vp->vscale_z) >> 16) + vp->vtrans_z;
-
-    /* Inverse-w: hand the caller the full-precision (1/w) * perspNorm as a
-     * 64-bit value, (pn << 41) / cw. The absolute scale of the RDP W
-     * coefficient is free -- the rasterizer's tcdiv normalises the leading
-     * bit of w and only the S:T:W ratios matter -- but its precision is not:
-     * the RSP stores the reciprocal mantissa-normalised, so the emitted W
-     * always lands near 2^30 regardless of the actual depth. Verified against
-     * the cxd4 LLE stream: a pause-menu wall at w ~ 80 under perspNorm 10 and
-     * an ortho HUD quad at w == 1 under perspNorm 0xFFFF both carry W ~
-     * 0x40000000. A fixed post-shift (the previous << 8) is only correct for
-     * one w * pn regime and overflowed int32 for the ortho HUD (negative
-     * garbage W made the per-pixel texture divide collapse, e.g. the A-button
-     * oval vanished). bridge_add_triangle normalises the triangle's three raw
-     * values with one common shift instead. */
-    {
-        unsigned int pn = vp->persp_norm ? vp->persp_norm : 0xffffu;
-        if (v->cw > 0)
-            *w_raw = ((int64_t)(int)pn << 41) / v->cw;
-        else
-            *w_raw = 0;
-    }
     /* RSP-exact vertex transform: when in-domain it supersedes the screen
-     * position computed above with the microcode's own MAC-chain results,
-     * making the downstream triangle write bit-identical to the LLE RSP. */
+     * position of the divide below with the microcode's own MAC-chain
+     * results, making the downstream triangle write bit-identical to the
+     * LLE RSP; the divide then is not needed. */
     e->rsp_ok = 0;
     e->rsp_invw = 0;
     if (vp->rs_model)
@@ -138,6 +64,87 @@ void bridge_compute_screen(const BridgeVertex *v, const BridgeViewport *vp,
             e->rsp_ok = 1;
             e->rsp_invw = iw;
         }
+    }
+    if (!e->rsp_ok)
+    {
+        /* Perspective divide. The RSP uses the double-precision reciprocal
+         * (VRCPL, refined from the VRCP div_ROM estimate) for the screen-
+         * coordinate divide, which is full 32-bit precision. The single VRCP
+         * estimate (rsp_recip_div) has only ~10-bit mantissa -- fine for X/Y
+         * (sub-pixel) but far too coarse for the Z plane, where near-coplanar
+         * vertices differ only in the low bits of z and the coarse reciprocal
+         * turned those differences into noise (the scrambled-depth bug).
+         * Compute the NDC with the exact full-precision divide ndc = (clip <<
+         * 16) / cw (s15.16), matching VRCPL. cw>0 is guaranteed by the
+         * caller's clip/cull (degenerate and w<=0 triangles are dropped). */
+        int32_t ndcx, ndcy, ndcz;
+        if (v->cw != 0)
+        {
+            /* Saturate the s15.16 NDC instead of letting the int32 cast wrap: a
+             * vertex barely in front of the eye (tiny cw) projects to coordinates
+             * far beyond the s15.16 range, and wrapped values would masquerade as
+             * sane screen positions. */
+            int64_t nx64 = ((int64_t)v->cx << 16) / v->cw;
+            int64_t ny64 = ((int64_t)v->cy << 16) / v->cw;
+            int64_t nz64 = ((int64_t)v->cz << 16) / v->cw;
+            int64_t lim = (int64_t)1 << 30;
+            if (nx64 >  lim) nx64 =  lim;
+            if (nx64 < -lim) nx64 = -lim;
+            if (ny64 >  lim) ny64 =  lim;
+            if (ny64 < -lim) ny64 = -lim;
+            if (nz64 >  lim) nz64 =  lim;
+            if (nz64 < -lim) nz64 = -lim;
+            ndcx = (int32_t)nx64;
+            ndcy = (int32_t)ny64;
+            ndcz = (int32_t)nz64;
+        }
+        else
+        {
+            ndcx = ndcy = ndcz = 0;
+        }
+
+        e->x = (int32_t)(((int64_t)ndcx * vp->vscale_x) >> 16) + vp->vtrans_x;
+        /* NDC +y points up (guPerspective), screen y grows downward and the Vp
+         * vscale[1] is stored positive (View_ViewportToVp: height*2), so the
+         * RSP screen map negates the y term: y = vtrans - ndc_y * vscale.
+         * Verified against the cxd4 stream (single-pass triangle y sets match
+         * exactly). */
+        e->y = vp->vtrans_y - (int32_t)(((int64_t)ndcy * vp->vscale_y) >> 16);
+
+        /* The RSP stores vertex screen coordinates as S13.2 -- quarter-pixel
+         * precision -- and ALL of its edge and attribute setup happens on the
+         * quantized values. Keeping the full s15.16 here made the emitted edge
+         * slopes inconsistent with the .2-quantized YH/YM/YL fields the
+         * rasterizer walks from (up to ~6% on short edges), so silhouette
+         * edges overshot their true vertices by up to half a pixel: on OoT
+         * actors a closer surface leaked single-pixel runs past its boundary
+         * (hair past the hat/face seam -- the in-game "streak" artifact).
+         * Truncate to the .25 grid before any setup; the oracle's coefficient
+         * sets (xh == xm at the shared top vertex, dxm == (xl-xh)/(ym-yh)
+         * exactly over the quantized deltas) confirm the RSP convention. */
+        e->x = (int32_t)((uint32_t)e->x & ~0x3fffu);
+        e->y = (int32_t)((uint32_t)e->y & ~0x3fffu);
+        e->z = (int32_t)(((int64_t)ndcz * vp->vscale_z) >> 16) + vp->vtrans_z;
+    }
+    /* Inverse-w: hand the caller the full-precision (1/w) * perspNorm as a
+     * 64-bit value, (pn << 41) / cw. The absolute scale of the RDP W
+     * coefficient is free -- the rasterizer's tcdiv normalises the leading
+     * bit of w and only the S:T:W ratios matter -- but its precision is not:
+     * the RSP stores the reciprocal mantissa-normalised, so the emitted W
+     * always lands near 2^30 regardless of the actual depth. Verified against
+     * the cxd4 LLE stream: a pause-menu wall at w ~ 80 under perspNorm 10 and
+     * an ortho HUD quad at w == 1 under perspNorm 0xFFFF both carry W ~
+     * 0x40000000. A fixed post-shift (the previous << 8) is only correct for
+     * one w * pn regime and overflowed int32 for the ortho HUD (negative
+     * garbage W made the per-pixel texture divide collapse, e.g. the A-button
+     * oval vanished). bridge_add_triangle normalises the triangle's three raw
+     * values with one common shift instead. */
+    {
+        unsigned int pn = vp->persp_norm ? vp->persp_norm : 0xffffu;
+        if (v->cw > 0)
+            *w_raw = ((int64_t)(int)pn << 41) / v->cw;
+        else
+            *w_raw = 0;
     }
 }
     *out_x = e->x;
@@ -196,7 +203,8 @@ static int try_rsp_tri_write(int32_t *cmd,
                              int smooth,
                              int tile, int level,
                              int32_t dx_scale, int32_t idy_scale,
-                             int32_t frac_mask, int32_t vcr_bound)
+                             int32_t frac_mask, int32_t vcr_bound,
+                             const BridgeViewport *vp, int cull_mode)
 {
     RspTriVtx r[3];
     const EmitVertex *ev[3];
@@ -236,7 +244,32 @@ static int try_rsp_tri_write(int32_t *cmd,
         r[i].t = tct;
         r[i].invw = ev[i]->rsp_invw;
         r[i].pw = ev[i]->rs_pw;
+        r[i].cx = bv[i]->cx;
+        r[i].cy = bv[i]->cy;
+        r[i].cz = bv[i]->cz;
+        r[i].cw = bv[i]->cw;
+        r[i].f3d_flags = 0;
         r[i].flat2d = bv[i]->flat2d;
+    }
+    if (vp->f3d_tri_rev != F3D_TRI_NONE)
+    {
+        /* Fast3D (the revision A builds; revision B runs its whole
+         * triangle command from the frontend): rebuild the microcode's
+         * geometry-mode word (F3D bit layout) from the resolved flags */
+        F3dTriState st;
+        memset(&st, 0, sizeof(st));
+        st.rev = vp->f3d_tri_rev;
+        st.geometry_mode = (z_buffered ? 0x1u : 0u) | (textured ? 0x2u : 0u)
+                         | (shaded ? 0x4u : 0u) | (smooth ? 0x200u : 0u)
+                         | ((unsigned int)(cull_mode & 3) << 12);
+        st.persp_norm = vp->persp_norm;
+        st.tile = tile;
+        st.level = level;
+        st.zclamp = vp->f3d_zclamp;
+        st.flat_select = vp->f3d_flat_select;
+        st.flat_vtx = vp->f3d_flat_vtx;
+        st.tex_scale_a = vp->f3d_tex_scale_a;
+        return rsp_tri_write_f3d(cmd, &r[0], &r[1], &r[2], &st);
     }
     return rsp_tri_write(cmd, &r[0], &r[1], &r[2],
                          textured, z_buffered, shaded, smooth, tile, level,
@@ -322,7 +355,8 @@ int bridge_add_triangle(int32_t *cmd,
                           vp->tri_dx_scale ? vp->tri_dx_scale : 0x4000,
                           vp->tri_idy_scale ? vp->tri_idy_scale : 0x0008,
                           vp->tri_frac_mask ? vp->tri_frac_mask : (int32_t)0xffff,
-                          vp->tri_vcr_bound ? vp->tri_vcr_bound : 0x1cc);
+                          vp->tri_vcr_bound ? vp->tri_vcr_bound : 0x1cc,
+                          vp, cull_mode);
     if (n >= 0)
         return n;
 

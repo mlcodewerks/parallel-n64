@@ -55,6 +55,7 @@
 #include "cheat.h"
 #include "device/device.h"
 #include "device/dd/disk.h"
+#include "device/dd/dd_ipl_hle.h"
 #include "device/controllers/vru_controller.h"
 #include "device/controllers/paks/biopak.h"
 
@@ -148,9 +149,31 @@ struct xoshiro256pp_state l_mpk_idgen;
 * static functions
 */
 
+/* <save dir>/<GB ROM name>.port<N>.sav, owned by the caller (the file
+ * storage frees it); NULL without a ROM name */
 static char *get_gb_ram_path(const char* gbrom, unsigned int control_id)
 {
-    return "";
+    const char* dir = NULL;
+    const char* dot;
+    size_t base_len, len;
+    char* path;
+
+    if (gbrom == NULL || gbrom[0] == '\0')
+        return NULL;
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &dir) || dir == NULL)
+        dir = "";
+    dot = strrchr(gbrom, '.');
+    base_len = dot ? (size_t)(dot - gbrom) : strlen(gbrom);
+    len = strlen(dir) + 1 + base_len + sizeof(".port4.sav");
+    path = (char*)malloc(len);
+    if (path == NULL)
+        return NULL;
+    if (dir[0] != '\0')
+        snprintf(path, len, "%s%s%.*s.port%u.sav", dir, PATH_DEFAULT_SLASH(),
+                 (int)base_len, gbrom, control_id);
+    else
+        snprintf(path, len, "%.*s.port%u.sav", (int)base_len, gbrom, control_id);
+    return path;
 }
 
 const char *get_dd_disk_save_path(const char* diskname, int save_format)
@@ -188,6 +211,7 @@ static void main_check_inputs(void)
          * so it can still be unset when the machine runs. */
         if (poll_cb)
         {
+            inputPollMouse();
             // Input Polling will be forced to early if Threaded GLideN64
             poll_cb();
         }
@@ -360,14 +384,19 @@ static void load_dd_rom(uint8_t* rom, size_t* rom_size, uint8_t* disk_region)
     memset(&dd_rom, 0, sizeof(dd_rom));
 
     if (open_rom_file_storage(&dd_rom, dd_ipl_rom_filename) != file_ok) {
-        DebugMessage(M64MSG_ERROR, "Failed to load DD IPL ROM: %s. Disabling 64DD", dd_ipl_rom_filename);
+        DebugMessage(M64MSG_WARNING, "Failed to load DD IPL ROM: %s", dd_ipl_rom_filename);
         goto no_dd;
     }
 
     DebugMessage(M64MSG_INFO, "DD IPL ROM: %s", dd_ipl_rom_filename);
 
-    /* load and swap DD IPL ROM */
+    /* load and swap DD IPL ROM; it has to fit its memory block */
     *rom_size = g_ifile_storage_ro.size(&dd_rom);
+    if (*rom_size < 4 || *rom_size > DD_ROM_MAX_SIZE) {
+        DebugMessage(M64MSG_ERROR, "Invalid DD IPL ROM size: %u", (unsigned)*rom_size);
+        close_file_storage(&dd_rom);
+        goto no_dd;
+    }
     memcpy(rom, g_ifile_storage_ro.data(&dd_rom), *rom_size);
     close_file_storage(&dd_rom);
 
@@ -394,16 +423,23 @@ static void load_dd_rom(uint8_t* rom, size_t* rom_size, uint8_t* disk_region)
         break;
 
     default: /* unknown */
-        DebugMessage(M64MSG_ERROR, "Invalid DD IPL ROM: Disabling 64DD.");
-        *rom_size = 0;
-        return;
+        DebugMessage(M64MSG_ERROR, "Invalid DD IPL ROM: %s", dd_ipl_rom_filename);
+        goto no_dd;
     }
 
+    free(pathname);
+    dd_ipl_hle_set_enabled(0);
     return;
 
 no_dd:
-    free(dd_ipl_rom_filename);
-    *rom_size = 0;
+    /* the name is the frontend's staged path or this function's buffer,
+     * never ours to free on its own */
+    free(pathname);
+
+    /* No usable IPL ROM: boot the disk through the cleanroom IPL. */
+    DebugMessage(M64MSG_INFO, "DD IPL ROM not available: using the built-in IPL");
+    *rom_size = dd_ipl_hle_build_rom((uint32_t*)rom, *disk_region);
+    dd_ipl_hle_set_enabled(1);
 }
 
 extern char* retro_dd_path_img;
@@ -667,6 +703,8 @@ static void init_gb_ram(void* opaque, size_t ram_size, void** storage, const str
     if (ram_filename == NULL || strlen(ram_filename) == 0) {
         free(ram_filename);
         ram_filename = get_gb_ram_path(namefrompath(data->rom_fstorage.filename), data->control_id+1);
+        if (ram_filename == NULL)
+            ram_filename = strdup("");
     }
 
     /* Open RAM file
@@ -915,6 +953,7 @@ m64p_error main_run(void)
     else
     {
         dd_rom_size = 0;
+        dd_ipl_hle_set_enabled(0);
     }
 
     /* ensure the 64DD rom & disk are loaded,

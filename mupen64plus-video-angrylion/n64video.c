@@ -149,7 +149,9 @@ static uint32_t flush_count;
  * accumulate the command words of the first frame at or past VI N into a
  * static buffer, and flush the buffer to the file when that frame ends.
  * No file I/O in the parse hot path, no pointer kept across the frame. */
-static uint32_t al_cap_buf[1 << 20];   /* up to 1M command words */
+#define AL_CAP_WORDS (1u << 20)   /* up to 1M command words */
+static const char *al_cap_path;    /* AL_CAPTURE, read once at init */
+static uint32_t *al_cap_buf;       /* allocated only while capturing */
 static uint32_t al_cap_words;
 static uint32_t al_cap_vireg[16];
 static long al_cap_frame, al_cap_target = -2, al_cap_locked = -1, al_cap_capvi = -1;
@@ -158,7 +160,7 @@ long al_cap_vi;   /* bumped once per VI by update_screen */
 static void al_capture_cmd(const uint32_t *words, uint32_t n)
 {
     uint32_t k;
-    if (!getenv("AL_CAPTURE")) return;
+    if (!al_cap_buf) return;
     if (n == 0 || n > 64 || !words) return;
     if (al_cap_target == -2) al_cap_target = getenv("AL_CAPTURE_FRAME") ? atol(getenv("AL_CAPTURE_FRAME")) : 0;
     if (al_cap_locked >= 0) return;                 /* already have a frame */
@@ -166,7 +168,7 @@ static void al_capture_cmd(const uint32_t *words, uint32_t n)
     if (al_cap_words == 0)                           /* first command of it */
         for (k = 0; k < VI_NUM_REG && k < 16; k++)
             al_cap_vireg[k] = (config.gfx.vi_reg && config.gfx.vi_reg[k]) ? *config.gfx.vi_reg[k] : 0;
-    if (al_cap_words + n + 1 > (uint32_t)(sizeof(al_cap_buf) / sizeof(al_cap_buf[0])))
+    if (al_cap_words + n + 1 > AL_CAP_WORDS)
         return;
     for (k = 0; k < n; k++) al_cap_buf[al_cap_words++] = words[k];
     /* mark the VI this frame belongs to so the flush fires at its end */
@@ -176,8 +178,8 @@ static void al_capture_cmd(const uint32_t *words, uint32_t n)
 void al_capture_vi(void);
 static void al_capture_flush_if_ready(void)
 {
-    const char *env = getenv("AL_CAPTURE");
-    if (!env || al_cap_locked >= 0 || al_cap_words == 0) return;
+    const char *env = al_cap_path;
+    if (!al_cap_buf || al_cap_locked >= 0 || al_cap_words == 0) return;
     if (al_cap_vi <= al_cap_capvi) return;          /* frame not finished */
     {
         FILE *f = fopen(env, "wb");
@@ -197,6 +199,24 @@ static void al_capture_flush_if_ready(void)
     (void)al_cap_frame;
 }
 void al_capture_vi(void) { al_capture_flush_if_ready(); }
+
+static void al_capture_init(void)
+{
+    al_cap_path = getenv("AL_CAPTURE");
+    if (al_cap_path && !al_cap_buf)
+        al_cap_buf = (uint32_t*)malloc(AL_CAP_WORDS * sizeof(*al_cap_buf));
+}
+
+static void al_capture_close(void)
+{
+    free(al_cap_buf);
+    al_cap_buf    = NULL;
+    al_cap_path   = NULL;
+    al_cap_words  = 0;
+    al_cap_locked = -1;
+    al_cap_capvi  = -1;
+    al_cap_target = -2;
+}
 
 /* Upscaling: the console images the buffered drawing has written to
  * since they were last resolved. Only these are ever resolved back into
@@ -326,8 +346,27 @@ void n64video_resolve_for_display(uint32_t origin)
     }
 }
 
+/* The RDP addresses RDRAM through a 24-bit pointer, so a load or image
+ * that runs past 16 MiB wraps to the bottom. Fold each range into that
+ * domain: one already past the top moves down, and one straddling it
+ * covers the whole domain, which is conservative but rare. Compared raw,
+ * a load wrapping onto the framebuffer would not be seen to overlap it. */
+#define HZ_DOMAIN 0x1000000u
+static void hz_normalize_range(uint32_t *lo, uint32_t *hi)
+{
+    uint32_t bytes = *hi - *lo;
+    *lo &= HZ_DOMAIN - 1u;
+    if (bytes > HZ_DOMAIN - *lo) {
+        *lo = 0;
+        *hi = HZ_DOMAIN;
+    } else {
+        *hi = *lo + bytes;
+    }
+}
+
 static void hz_pend_extend(int k, uint32_t lo, uint32_t hi)
 {
+    hz_normalize_range(&lo, &hi);
     if (!hz.pend_valid[k] || lo < hz.pend_lo[k])
         hz.pend_lo[k] = lo;
     if (!hz.pend_valid[k] || hi > hz.pend_hi[k])
@@ -338,6 +377,7 @@ static void hz_pend_extend(int k, uint32_t lo, uint32_t hi)
 static bool hz_pend_overlaps(uint32_t lo, uint32_t hi)
 {
     int k;
+    hz_normalize_range(&lo, &hi);
     for (k = 0; k < 2; k++)
         if (hz.pend_valid[k] && lo < hz.pend_hi[k] && hi > hz.pend_lo[k])
             return true;
@@ -346,6 +386,7 @@ static bool hz_pend_overlaps(uint32_t lo, uint32_t hi)
 
 static void hz_load_extend(uint32_t lo, uint32_t hi)
 {
+    hz_normalize_range(&lo, &hi);
     if (!hz.load_valid || lo < hz.load_lo)
         hz.load_lo = lo;
     if (!hz.load_valid || hi > hz.load_hi)
@@ -355,6 +396,7 @@ static void hz_load_extend(uint32_t lo, uint32_t hi)
 
 static bool hz_load_overlaps(uint32_t lo, uint32_t hi)
 {
+    hz_normalize_range(&lo, &hi);
     return hz.load_valid && lo < hz.load_hi && hi > hz.load_lo;
 }
 
@@ -490,6 +532,24 @@ static void cmd_sync_full(void)
         al_resolve_all();
     rdp_sync_full(0, NULL);
 }
+/* The noise phase reaches guest framebuffer bytes (dither, alpha
+ * compare noise), so a savestate keeps it: the per-frame field and the
+ * primitive counter within the frame.  Every worker walks every
+ * primitive, so their counters agree. */
+void n64video_noise_save(uint32_t* out)
+{
+    out[0] = rdp_noise_field;
+    out[1] = state[0].noise_seq;
+}
+
+void n64video_noise_load(const uint32_t* in)
+{
+    uint32_t k;
+    rdp_noise_field = in[0];
+    for (k = 0; k < PARALLEL_MAX_WORKERS; k++)
+        state[k].noise_seq = in[1];
+}
+
 /* per command: the parse state of the next one */
 static void cmd_init(void)
 {
@@ -520,6 +580,8 @@ void n64video_init(struct n64video_config* _config)
 {
     if (_config)
         config = *_config;
+
+    al_capture_init();
 
     // initialize static lookup tables and RDP state, once is enough
     static bool static_init;
@@ -995,6 +1057,14 @@ void n64video_process_list(void)
             for (i = 0; i < toload; i++) {
                 cmd_buf[rdp_cmd_pos++] = dmem[dp_current_al++ & 0x3ff];
             }
+        } else if (hle_cmd_buf != NULL
+                   && dp_current_al - hle_cmd_base_idx < hle_cmd_len_words
+                   && hle_cmd_len_words - (dp_current_al - hle_cmd_base_idx) >= toload) {
+            /* an HLE list: the words straight out of the emitter's FIFO */
+            memcpy(&cmd_buf[rdp_cmd_pos], hle_cmd_buf + (dp_current_al - hle_cmd_base_idx),
+                   toload * sizeof(uint32_t));
+            rdp_cmd_pos += toload;
+            dp_current_al += toload;
         } else {
             for (i = 0; i < toload; i++) {
                 cmd_buf[rdp_cmd_pos++] = rdp_fetch_cmd_word(dp_current_al++);
@@ -1246,8 +1316,9 @@ void n64video_process_list(void)
         }
     }
 
-    // update DP registers to indicate that all bytes have been read
-    *dp_reg[DP_START] = *dp_reg[DP_CURRENT] = *dp_reg[DP_END];
+    /* every byte has been read: CURRENT reaches END. START keeps the
+     * address the CPU wrote, as it reads back on the RDP. */
+    *dp_reg[DP_CURRENT] = *dp_reg[DP_END];
 }
 void n64video_close(void)
 {
@@ -1258,6 +1329,7 @@ void n64video_close(void)
 #endif
 
     al_key_report();
+    al_capture_close();
     vi_close();
     parallel_close();
     rdram_close();

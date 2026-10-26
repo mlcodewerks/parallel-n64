@@ -34,6 +34,14 @@ extern "C"
 {
 #endif
 
+#define VR_AIM_BUTTON_VALUES \
+   {"None", "Disabled"}, \
+   {"A", "A Button"}, {"B", "B Button"}, {"Z", "Z Trigger"}, \
+   {"L", "L Trigger"}, {"R", "R Trigger"}, {"Start", "Start"}, \
+   {"C-Up", NULL}, {"C-Down", NULL}, {"C-Left", NULL}, {"C-Right", NULL}, \
+   {"D-Pad Up", NULL}, {"D-Pad Down", NULL}, {"D-Pad Left", NULL}, {"D-Pad Right", NULL}, \
+   { NULL, NULL }
+
 #define HAVE_NO_LANGEXTRA
 struct retro_core_option_v2_category option_cats_us[] = {
    {
@@ -463,6 +471,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "-100"
     },
     {
+        CORE_NAME "-mouse-boost",
+        "Mouse Small Movement Boost",
+        NULL,
+        "Amplifies small mouse movements to make fine aiming practical. Higher = more boost; at 10 the stick follows the square root of the motion.",
+        NULL,
+        "input",
+        {
+            {"0", "Off"}, {"1", NULL}, {"2", NULL}, {"3", NULL}, {"4", NULL},
+            {"5", NULL}, {"6", NULL}, {"7", NULL}, {"8", NULL}, {"9", NULL}, {"10", NULL},
+            { NULL, NULL },
+        },
+        "0"
+    },
+    {
         CORE_NAME "-mouse-left",
         "Mouse Left Click",
         NULL,
@@ -647,6 +669,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "memory", NULL },
             { "rumble", NULL },
             { "biosensor", NULL },
+            { "transfer", NULL },
             { NULL, NULL },
         },
         "none"
@@ -663,6 +686,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "memory", NULL },
             { "rumble", NULL },
             { "biosensor", NULL },
+            { "transfer", NULL },
             { NULL, NULL },
         },
         "none"
@@ -679,6 +703,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "memory", NULL },
             { "rumble", NULL },
             { "biosensor", NULL },
+            { "transfer", NULL },
             { NULL, NULL },
         },
         "none"
@@ -695,6 +720,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { "memory", NULL },
             { "rumble", NULL },
             { "biosensor", NULL },
+            { "transfer", NULL },
             { NULL, NULL },
         },
         "none"
@@ -878,6 +904,34 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { NULL, NULL },
         },
         "disable"
+    },
+    {
+        CORE_NAME "-parallel-rdp-super-sampled-read-back",
+        "(ParaLLEl-RDP) Super-sampled read-back",
+        "Super-sampled read-back",
+        "When upscaling, average the upscaled samples when a frame is read back into game memory instead of taking one sample per pixel. Can smooth framebuffer effects; changes what the game reads back. Takes effect on restart.",
+        NULL,
+        "parallel",
+        {
+            { "disabled", NULL },
+            { "enabled", NULL },
+            { NULL, NULL },
+        },
+        "disabled"
+    },
+    {
+        CORE_NAME "-parallel-rdp-super-sampled-read-back-dither",
+        "(ParaLLEl-RDP) Super-sampled read-back dither",
+        "Super-sampled read-back dither",
+        "Dither the averaged read-back down to the game's colour depth. Only applies with super-sampled read-back. Takes effect on restart.",
+        NULL,
+        "parallel",
+        {
+            { "enabled", NULL },
+            { "disabled", NULL },
+            { NULL, NULL },
+        },
+        "enabled"
     },
     {
         CORE_NAME "-parallel-rdp-native-tex-rect",
@@ -1307,6 +1361,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { NULL, NULL }
         },
         "True"
+    },
+    {
+        CORE_NAME "-dma-timing",
+        "PI/SI DMA Timing",
+        NULL,
+        "'Bus Registers' times cartridge and controller DMAs from the PI domain timing registers and the joybus command list, as the hardware does. 'Fixed' keeps the per-device durations.",
+        NULL,
+        NULL,
+        {
+            {"fixed", "Fixed"},
+            {"registers", "Bus Registers"},
+            { NULL, NULL }
+        },
+        "fixed"
     },
     {
         CORE_NAME "-allow-large-roms",
@@ -2239,6 +2307,105 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { NULL, NULL },
         },
         "0"
+    },
+    {
+        CORE_NAME "-vr-aim-controller",
+        "VR Laser Pointer Aim",
+        NULL,
+        "(GLideN64) Aim with a VR motion controller like a laser pointer. This drives the N64 analog stick. Needs a headset session.",
+        "Aim with a VR motion controller like a laser pointer. This drives the N64 analog stick. Needs a headset session.",
+        "vr",
+        {
+            {"off", "Off"},
+            {"left", "Left Controller"},
+            {"right", "Right Controller"},
+            { NULL, NULL },
+        },
+        "off"
+    },
+    {
+        CORE_NAME "-vr-aim-output",
+        "VR Laser Pointer Output",
+        NULL,
+        "(GLideN64) The laser pointer drives the analog stick, or four configurable buttons. Only used while VR Laser Pointer Aim is set to a controller.",
+        "The laser pointer drives the analog stick, or four configurable buttons. Only used while VR Laser Pointer Aim is set to a controller.",
+        "vr",
+        {
+            {"stick", "Analog Stick (Pad 1)"},
+            {"buttons", "Four Buttons (Pad 1)"},
+            {"stick-p2", "Analog Stick (Pad 2)"},
+            {"buttons-p2", "Four Buttons (Pad 2)"},
+            { NULL, NULL },
+        },
+        "stick"
+    },
+    {
+        CORE_NAME "-vr-aim-invert-y",
+        "VR Laser Pointer Invert Y (Thumbstick mode only)",
+        NULL,
+        "(GLideN64) Invert the vertical axis of laser pointer aim. Only used while VR Laser Pointer Aim is set to a controller.",
+        "Invert the vertical axis of laser pointer aim. Only used while VR Laser Pointer Aim is set to a controller.",
+        "vr",
+        {
+            {"off", "Off"},
+            {"on", "On"},
+            { NULL, NULL },
+        },
+        "off"
+    },
+    {
+        CORE_NAME "-vr-aim-button-threshold",
+        "VR Laser Pointer Button Threshold (Four Buttons mode only)",
+        NULL,
+        "(GLideN64) Four Buttons output only. How far from the centre the pointer must be to press a direction, in percent of its range. Releases a little closer to the centre than it presses.",
+        "Four Buttons output only. How far from the centre the pointer must be to press a direction, in percent of its range.",
+        "vr",
+        {
+            {"20", "20%"}, {"30", "30%"}, {"40", "40%"}, {"50", "50%"},
+            {"60", "60%"}, {"70", "70%"}, {"80", "80%"}, {"90", "90%"},
+            { NULL, NULL },
+        },
+        "50"
+    },
+    {
+        CORE_NAME "-vr-aim-button-up",
+        "VR Laser Pointer Up Button",
+        NULL,
+        "(GLideN64) Four Buttons output only. Button pressed while the pointer is above the threshold.",
+        "Four Buttons output only. Button pressed while the pointer is above the threshold.",
+        "vr",
+        { VR_AIM_BUTTON_VALUES },
+        "C-Up"
+    },
+    {
+        CORE_NAME "-vr-aim-button-down",
+        "VR Laser Pointer Down Button",
+        NULL,
+        "(GLideN64) Four Buttons output only. Button pressed while the pointer is below the threshold.",
+        "Four Buttons output only. Button pressed while the pointer is below the threshold.",
+        "vr",
+        { VR_AIM_BUTTON_VALUES },
+        "C-Down"
+    },
+    {
+        CORE_NAME "-vr-aim-button-left",
+        "VR Laser Pointer Left Button",
+        NULL,
+        "(GLideN64) Four Buttons output only. Button pressed while the pointer is left of the threshold.",
+        "Four Buttons output only. Button pressed while the pointer is left of the threshold.",
+        "vr",
+        { VR_AIM_BUTTON_VALUES },
+        "C-Left"
+    },
+    {
+        CORE_NAME "-vr-aim-button-right",
+        "VR Laser Pointer Right Button",
+        NULL,
+        "(GLideN64) Four Buttons output only. Button pressed while the pointer is right of the threshold.",
+        "Four Buttons output only. Button pressed while the pointer is right of the threshold.",
+        "vr",
+        { VR_AIM_BUTTON_VALUES },
+        "C-Right"
     },
 #endif
     {

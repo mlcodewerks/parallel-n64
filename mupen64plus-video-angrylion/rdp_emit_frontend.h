@@ -40,6 +40,8 @@ typedef struct GSPVertex
                                are these doubled (with int32 wrap for large
                                coordinates), which the emit path expects. */
     int     clip;           /* clip flags (outcode) */
+    int     f3d_flags;      /* Fast3D revision B record clip flags (the
+                               microcode's own halfword, pair-dependent) */
     /* Store-time screen snapshot (see BridgeVertex): the microcode
      * computes screen coordinates and 1/w at G_VTX time under the
      * then-active viewport/perspNorm and the triangle write reloads
@@ -107,12 +109,13 @@ typedef struct GSPState
     int fog_off;
     int pd_ci;                /* Perfect Dark colour-indexed vertex format */
     unsigned int pd_cbase;    /* physical base of the vertex colour table */
-    int cbfd;                 /* Conker CBFD vertex/lighting model */
+    int cbfd;                 /* Conker CBFD lighting: 1 F3DEXBG, 2 its normal-indexed build */
     unsigned int cbfd_nbase;  /* physical base of the per-vertex normal table */
     int t3d_zbuffered;        /* T3DUX: depth-test state sniffed from othermode */
-    int32_t cbfd_lpos[GSP_MAX_LIGHTS][3]; /* CBFD point-light s16 positions */
+    int32_t cbfd_lpos[GSP_MAX_LIGHTS][4]; /* CBFD point-light s16 positions, W in [3] */
     int32_t cbfd_lca[GSP_MAX_LIGHTS];     /* CBFD point-light ca numerator (light byte = ca*16) */
     int32_t cbfd_cmod[16];    /* G_MW_COORD_MOD offset/scale rows (12..15 in 16.16) */
+    const unsigned char *cbfd_dmem; /* F3DEXBG DMEM image for the pair copies, or 0 */
     int acclaim;              /* Acclaim F3DEX2 variant (Turok 2/3, Armorines,
                                  South Park): custom L1-distance point lighting */
     int acclaim_active;       /* the Acclaim lighting geometry-mode bit is set */
@@ -215,10 +218,14 @@ typedef struct GSPState
 } GSPState;
 
 /* lifecycle */
+void gsp_set_legacy_lighting(int mode);
 void gsp_init(GSPState *s);
 void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
                              unsigned int rdram_size,
                              unsigned int ud, unsigned int ut);
+/* 1 when the (data, text) pair is a build with no far-plane outcode */
+int gsp_ucode_drops_far(const unsigned char *rdram, unsigned int rdram_size,
+                        unsigned int ud, unsigned int ut);
 
 /* MOVEMEM G_MV_LIGHT slots 0 and 1: the texture-coordinate-generation
  * lookat X/Y direction vectors (s8 at bytes 8..10 of the Light struct). */
@@ -288,6 +295,10 @@ unsigned int gsp_get_geometry_mode(const GSPState *s);
 void gsp_set_num_lights(GSPState *s, int n);
 void gsp_set_light(GSPState *s, const unsigned char *rdram,
                    unsigned int addr, int index);
+/* Fast3D (Mario Kart 64): the default lights of the data segment at ud,
+ * as the task's DMEM load restores them. */
+void gsp_f3d_task_lights(GSPState *s, const unsigned char *rdram,
+                         unsigned int rdram_size, unsigned int ud);
 void gsp_set_light_color(GSPState *s, int index,
                          int32_t rr, int32_t gg, int32_t bb);
 void gsp_modify_vertex(GSPState *s, int vtx, unsigned int where,

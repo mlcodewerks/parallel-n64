@@ -8,7 +8,20 @@
  *    transfers nothing;
  *  - the 32 KiB SRAM mirrors through its domain;
  *  - 64DD buffer DMAs stop at the end of the buffer they name;
- *  - a debug message longer than the formatting buffer is truncated.
+ *  - a debug message longer than the formatting buffer is truncated;
+ *  - an SI DMA touches only the RDRAM that is installed, and with bus
+ *    timing on lasts as long as its joybus command list;
+ *  - an SP DMA wraps inside its 4 KiB bank, skips only between rows and
+ *    leaves the address and length registers where the hardware does;
+ *  - an IS-Viewer transfer length past its buffer is ignored;
+ *  - DPC_CLOCK counts on across an unfreeze, the 32-bit count wrap and a
+ *    savestate round trip;
+ *  - an SP DMA into RDRAM invalidates the recompiled code it overwrites,
+ *    wrapping at the end of RDRAM;
+ *  - a CLR_BROKE/CLR_HALT write while a finished task's SP_INT is still
+ *    pending does not run the task again;
+ *  - VI_V_SYNC keeps ten bits;
+ *  - an AI_LEN write with both FIFO slots taken is dropped.
  *
  * Built by `make check-core` (top-level Makefile). Exit status 0 on pass.
  */
@@ -19,6 +32,7 @@
 
 #include "api/callbacks.h"
 #include "backends/api/storage_backend.h"
+#include "device/cart/is_viewer.h"
 #include "device/cart/sram.h"
 #include "device/dd/dd_controller.h"
 #include "device/dd/disk.h"
@@ -60,10 +74,11 @@ unsigned int add_random_interrupt_time(struct r4300_core* r4300)
 }
 void cp0_update_count(struct r4300_core* r4300) { (void)r4300; }
 void gen_interrupt(struct r4300_core* r4300) { (void)r4300; }
+static unsigned int s_sp_int_pending;
 unsigned int* get_event(const struct interrupt_queue* q, int type)
 {
-    (void)q; (void)type;
-    return NULL;
+    (void)q;
+    return (type == SP_INT && s_sp_int_pending) ? &s_sp_int_pending : NULL;
 }
 void remove_event(struct interrupt_queue* q, int type) { (void)q; (void)type; }
 void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_cause)
@@ -74,9 +89,18 @@ static uint32_t s_cp0_regs[CP0_REGS_COUNT];
 static int s_cycle_count;
 uint32_t* r4300_cp0_regs(struct cp0* cp0) { (void)cp0; return s_cp0_regs; }
 int* r4300_cp0_cycle_count(struct cp0* cp0) { (void)cp0; return &s_cycle_count; }
+/* the ranges handed to the recompiler, for the DMA checks */
+static uint32_t s_inval_addr[8];
+static size_t s_inval_size[8];
+static unsigned s_inval_count;
 void invalidate_r4300_cached_code(struct r4300_core* r4300, uint32_t address, size_t size)
 {
-    (void)r4300; (void)address; (void)size;
+    (void)r4300;
+    if (s_inval_count < 8) {
+        s_inval_addr[s_inval_count] = address;
+        s_inval_size[s_inval_count] = size;
+    }
+    s_inval_count++;
 }
 void new_frame(void) { }
 void protect_framebuffers(struct fb* fb) { (void)fb; }
@@ -128,6 +152,7 @@ void init_fb(struct fb* fb, struct memory* mem, struct rdram* rdram,
     (void)fb; (void)mem; (void)rdram; (void)r4300;
 }
 void poweron_fb(struct fb* fb) { (void)fb; }
+void dd_ipl_hle_rom_fetch(uint32_t rom_off) { (void)rom_off; }
 uint8_t* get_sector_base(const struct dd_disk* disk, unsigned int head,
                          unsigned int track, unsigned int block, unsigned int sector)
 {
@@ -321,7 +346,15 @@ static void test_pi_dma(void)
     pi.ri = &ri;
     pi.dp = &dp;
 
+    s_inval_count = 0;
     CHECK(pi_dma(&pi, 1, 0x1000u, 0xffu) == 0x100u, "PI: in-range write DMA keeps its length");
+    CHECK(s_inval_count == 2
+          && s_inval_addr[0] == 0x80001000u && s_inval_size[0] == 0x100u
+          && s_inval_addr[1] == 0xa0001000u && s_inval_size[1] == 0x100u,
+          "PI: a write DMA from any source invalidates the recompiled code it overwrote");
+    s_inval_count = 0;
+    CHECK(pi_dma(&pi, 0, 0x1000u, 0xffu) == 0x100u && s_inval_count == 0,
+          "PI: a read DMA leaves recompiled code alone");
     CHECK(pi_dma(&pi, 1, 0x1006u, 0x00u) == 0u,
           "PI: a first block shorter than the DRAM misalignment transfers nothing");
     CHECK(pi_dma(&pi, 1, 0x1006u, 0x07u) == 2u, "PI: misalignment trims the first block");
@@ -450,6 +483,320 @@ static void test_debug_message(void)
           "DebugMessage: a long message is truncated to the buffer");
 }
 
+static void test_si_dma(void)
+{
+    static struct rdram rdram;
+    static struct ri_controller ri;
+    static struct pif pif;
+    static struct si_controller si;
+    static uint8_t pif_ram[PIF_RAM_SIZE];
+    unsigned char* bytes;
+    unsigned int i;
+    int clean = 1;
+
+    bytes = (unsigned char*)calloc(1, DRAM_SIZE + 0x100u);
+    memset(bytes + DRAM_SIZE, GUARD_BYTE, 0x100u);
+    rdram.dram = (uint32_t*)bytes;
+    rdram.dram_size = DRAM_SIZE;
+    ri.rdram = &rdram;
+    s_mi.r4300 = &s_r4300;
+    memset(&si, 0, sizeof(si));
+    si.mi = &s_mi;
+    si.pif = &pif;
+    si.ri = &ri;
+    pif.ram = pif_ram;
+
+    /* PIF -> RDRAM straddling the end of RDRAM */
+    memset(pif.ram, 0x3c, PIF_RAM_SIZE);
+    si.regs[SI_DRAM_ADDR_REG] = DRAM_SIZE - 8u;
+    write_si_regs(&si, MM_SI_REGS + SI_PIF_ADDR_RD64B_REG * 4u, 0x1fc007c0u, ~0u);
+    si_end_of_dma_event(&si);
+    for (i = 0; i < 0x100u; i++)
+        if (bytes[DRAM_SIZE + i] != GUARD_BYTE)
+            clean = 0;
+    CHECK(clean && bytes[DRAM_SIZE - 1u] == 0x3c,
+          "SI: a PIF read DMA stops at the end of RDRAM");
+
+    /* RDRAM -> PIF from the same place reads zeros past the end */
+    memset(pif.ram, 0x77, PIF_RAM_SIZE);
+    write_si_regs(&si, MM_SI_REGS + SI_STATUS_REG * 4u, 0, ~0u);
+    si.regs[SI_STATUS_REG] = 0;
+    write_si_regs(&si, MM_SI_REGS + SI_PIF_ADDR_WR64B_REG * 4u, 0x1fc007c0u, ~0u);
+    CHECK(pif.ram[0] == 0x3c && pif.ram[8] == 0 && pif.ram[PIF_RAM_SIZE - 1u] == 0,
+          "SI: a PIF write DMA reads zero past the end of RDRAM");
+
+    /* durations: fixed by default, from the command list with bus timing */
+    si.dma_duration = SI_DMA_DURATION_DEFAULT;
+    g_dma_bus_timing = 0;
+    CHECK(si_dma_duration(&si, 1) == SI_DMA_DURATION_DEFAULT, "SI: fixed duration by default");
+    g_dma_bus_timing = 1;
+    CHECK(si_dma_duration(&si, 0) == (4065u * 3u + 3u) / 4u, "SI: bus-timed write");
+    memset(pif.ram, 0, PIF_RAM_SIZE);
+    pif.ram[0] = 0xfe;
+    CHECK(si_dma_duration(&si, 1) == ((13600u + 1420u) * 3u + 3u) / 4u,
+          "SI: bus-timed read of an empty command list");
+    pif.ram[0] = 0x01; pif.ram[1] = 0x04; pif.ram[2] = 0x01; pif.ram[7] = 0xfe;
+    CHECK(si_dma_duration(&si, 1) == ((13600u + 18000u + 1420u) * 3u + 3u) / 4u,
+          "SI: bus-timed read of one controller poll");
+    si.dma_duration = 0x1234;
+    CHECK(si_dma_duration(&si, 1) == 0x1234, "SI: a database duration wins");
+    g_dma_bus_timing = 0;
+
+    free(bytes);
+}
+
+static void test_sp_dma(void)
+{
+    static struct rdram rdram;
+    static struct ri_controller ri;
+    static struct rdp_core dp;
+    static struct rsp_core sp;
+    static uint32_t sp_mem[0x2000 / 4];
+    unsigned char* mem = (unsigned char*)sp_mem;
+    unsigned char* dram;
+    unsigned i;
+    int ok = 1;
+
+    dram = (unsigned char*)calloc(1, 0x800000u);
+    for (i = 0; i < 0x200u; i++)
+        dram[i ^ S8] = (unsigned char)i;
+    rdram.dram = (uint32_t*)dram;
+    rdram.dram_size = 0x800000u;
+    ri.rdram = &rdram;
+    s_mi.r4300 = &s_r4300;
+    memset(&sp, 0, sizeof(sp));
+    memset(sp_mem, 0xee, sizeof(sp_mem));
+    sp.mem = sp_mem;
+    sp.ri = &ri;
+    sp.dp = &dp;
+    sp.mi = &s_mi;
+
+    /* RDRAM -> IMEM, two 16-byte rows at the top of IMEM, skip 0x18 with
+     * junk in its low bits */
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_MEM_ADDR_REG, 0x1ff8u, ~0u);
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_DRAM_ADDR_REG, 0x100u, ~0u);
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_RD_LEN_REG,
+                   (0x01bu << 20) | (1u << 12) | 0x00fu, ~0u);
+
+    for (i = 0; i < 8; i++)
+        if (mem[(0x1ff8u + i) ^ S8] != (unsigned char)(0x100u + i)
+         || mem[(0x1000u + i) ^ S8] != (unsigned char)(0x108u + i)
+         || mem[(0x1008u + i) ^ S8] != (unsigned char)(0x128u + i)
+         || mem[(0x1010u + i) ^ S8] != (unsigned char)(0x130u + i))
+            ok = 0;
+    for (i = 0; i < 0x1000u; i++)
+        if (mem[i] != 0xee)
+            ok = 0;
+    CHECK(ok, "SP DMA: rows wrap inside the IMEM bank, skip between rows");
+    CHECK(sp.regs[SP_MEM_ADDR_REG] == 0x1018u, "SP DMA: memory address keeps its bank");
+    CHECK(sp.regs[SP_DRAM_ADDR_REG] == 0x138u, "SP DMA: no skip after the last row");
+    CHECK(sp.regs[SP_RD_LEN_REG] == 0x01800ff8u && sp.regs[SP_WR_LEN_REG] == 0x01800ff8u,
+          "SP DMA: both length registers read back skip and 0xff8");
+
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_MEM_ADDR_REG, 0xffffffffu, ~0u);
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_DRAM_ADDR_REG, 0xffffffffu, ~0u);
+    CHECK(sp.regs[SP_MEM_ADDR_REG] == 0x1ff8u && sp.regs[SP_DRAM_ADDR_REG] == 0xfffff8u,
+          "SP DMA: address registers hold aligned values");
+
+    free(dram);
+}
+
+/* ---- RSP task dispatch ------------------------------------------------- */
+
+#if !defined(_WIN32)
+/* The debug switches the dispatcher looks up; counted rather than read, so
+ * the check sees whether every task queries the environment again. */
+static unsigned s_getenv_calls;
+char* getenv(const char* name)
+{
+    if (strncmp(name, "HARNESS_GFX_CAP", 15) == 0 || strncmp(name, "ZB_SHADOW", 9) == 0)
+        s_getenv_calls++;
+    return NULL;
+}
+#endif
+
+static unsigned int rsp_task_cycles(unsigned int cycles) { return cycles; }
+
+static void test_rsp_task_env(void)
+{
+    static struct rdram rdram;
+    static struct ri_controller ri;
+    static struct rdp_core dp;
+    static struct rsp_core sp;
+    static uint32_t sp_mem[0x2000 / 4];
+    unsigned i;
+
+    rdram.dram = (uint32_t*)calloc(1, 0x800000u);
+    rdram.dram_size = 0x800000u;
+    ri.rdram = &rdram;
+    s_mi.r4300 = &s_r4300;
+    memset(&sp, 0, sizeof(sp));
+    sp.mem = sp_mem;
+    sp.ri = &ri;
+    sp.dp = &dp;
+    sp.mi = &s_mi;
+    rsp.doRspCycles = rsp_task_cycles;
+    rsp_audio.doRspCycles = rsp_task_cycles;
+
+    for (i = 0; i < 8; i++) {
+        sp_mem[0xfc0 / 4] = (i & 1) ? 2 : 1;   /* graphics, audio, ... */
+        sp.regs[SP_STATUS_REG] = SP_STATUS_HALT;
+        do_SP_Task(&sp);
+    }
+#if !defined(_WIN32)
+    CHECK(s_getenv_calls <= 4,
+          "RSP: the debug switches are read once, not on every task");
+#endif
+    free(rdram.dram);
+}
+
+static void test_is_viewer(void)
+{
+    static struct is_viewer isv;
+
+    poweron_is_viewer(&isv);
+    write_is_viewer(&isv, 0x14u, 0xffffffffu, ~0u);
+    CHECK(isv.buffer_pos == 0, "IS64: a wrapping transfer length is ignored");
+    write_is_viewer(&isv, 0x14u, IS_BUFFER_SIZE, ~0u);
+    CHECK(isv.buffer_pos == 0, "IS64: a length past the text area is ignored");
+
+    memcpy(&isv.data[0x20], "ok", 2);
+    write_is_viewer(&isv, 0x14u, 2u, ~0u);
+    CHECK(isv.buffer_pos == 2 && memcmp(isv.output_buffer, "ok", 2) == 0,
+          "IS64: an in-range transfer is buffered");
+}
+
+static uint32_t dpc_clock_read(struct rdp_core* dp)
+{
+    uint32_t value = 0;
+    read_dpc_regs(dp, MM_DPC_REGS + 4u * DPC_CLOCK_REG, &value);
+    return value;
+}
+
+static uint32_t dpc_clock_expect(uint64_t counts)
+{
+    return (uint32_t)((counts * 4u) / 3u) & UINT32_C(0x00ffffff);
+}
+
+static void test_dpc_clock(void)
+{
+    static struct rdp_core dp;
+    static struct rdp_core restored;
+    uint32_t saved;
+
+    memset(&dp, 0, sizeof(dp));
+    dp.mi = &s_mi;
+    s_mi.r4300 = &s_r4300;
+
+    s_cp0_regs[CP0_COUNT_REG] = 1000u;
+    write_dpc_regs(&dp, MM_DPC_REGS + 4u * DPC_STATUS_REG, DPC_CLR_CLOCK_CTR, ~0u);
+    CHECK(dpc_clock_read(&dp) == 0u, "DPC: clearing the clock counter zeroes it");
+
+    s_cp0_regs[CP0_COUNT_REG] = 1300u;
+    CHECK(dpc_clock_read(&dp) == 400u, "DPC: clock advances four per three counts");
+
+    write_dpc_regs(&dp, MM_DPC_REGS + 4u * DPC_STATUS_REG, DPC_CLR_FREEZE, ~0u);
+    CHECK(dpc_clock_read(&dp) == 400u, "DPC: an unfreeze leaves the clock alone");
+
+    /* 2^32 + 3 counts after the clear, read once on the way */
+    s_cp0_regs[CP0_COUNT_REG] = 0u;
+    write_dpc_regs(&dp, MM_DPC_REGS + 4u * DPC_STATUS_REG, DPC_CLR_CLOCK_CTR, ~0u);
+    s_cp0_regs[CP0_COUNT_REG] = 0x80000000u;
+    (void)dpc_clock_read(&dp);
+    s_cp0_regs[CP0_COUNT_REG] = 3u;
+    CHECK(dpc_clock_read(&dp) == dpc_clock_expect(UINT64_C(0x100000003)),
+          "DPC: clock stays continuous across the count wrap");
+
+    s_cp0_regs[CP0_COUNT_REG] = 5000u;
+    rdp_sync_dpc_clock(&dp);
+    saved = dp.dpc_regs[DPC_CLOCK_REG];
+
+    memset(&restored, 0, sizeof(restored));
+    restored.mi = &s_mi;
+    restored.dpc_regs[DPC_CLOCK_REG] = saved;
+    rdp_restore_dpc_clock(&restored);
+    CHECK(dpc_clock_read(&restored) == saved, "DPC: a loaded state resumes the saved clock");
+    s_cp0_regs[CP0_COUNT_REG] = 5003u;
+    CHECK(dpc_clock_read(&restored) == ((saved + 4u) & UINT32_C(0x00ffffff)),
+          "DPC: the restored clock keeps counting");
+}
+
+static unsigned s_rsp_tasks;
+static unsigned int rsp_count_task(unsigned int cycles) { s_rsp_tasks++; return cycles; }
+
+static void test_device_writes(void)
+{
+    static struct rdram rdram;
+    static struct ri_controller ri;
+    static struct rdp_core dp;
+    static struct rsp_core sp;
+    static struct vi_controller vi;
+    static struct ai_controller ai;
+    static uint32_t sp_mem[0x2000 / 4];
+
+    rdram.dram = (uint32_t*)calloc(1, 0x800000u);
+    rdram.dram_size = 0x800000u;
+    ri.rdram = &rdram;
+    s_mi.r4300 = &s_r4300;
+    memset(&sp, 0, sizeof(sp));
+    sp.mem = sp_mem;
+    sp.ri = &ri;
+    sp.dp = &dp;
+    sp.mi = &s_mi;
+
+    /* DMEM -> RDRAM, one 16-byte row from 8 bytes below the top of RDRAM */
+    s_inval_count = 0;
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_MEM_ADDR_REG, 0x000u, ~0u);
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_DRAM_ADDR_REG, 0x7ffff8u, ~0u);
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_WR_LEN_REG, 0x00fu, ~0u);
+    CHECK(s_inval_count == 4
+       && s_inval_addr[0] == 0x807ffff8u && s_inval_size[0] == 8
+       && s_inval_addr[1] == 0xa07ffff8u && s_inval_size[1] == 8
+       && s_inval_addr[2] == 0x80000000u && s_inval_size[2] == 8
+       && s_inval_addr[3] == 0xa0000000u && s_inval_size[3] == 8,
+          "SP DMA: a write to RDRAM invalidates the code it overwrites, wrapping");
+
+    /* a finished task waits for its SP_INT before it can run again */
+    rsp.doRspCycles = rsp_count_task;
+    rsp_audio.doRspCycles = rsp_count_task;
+    sp_mem[0xfc0 / 4] = 2;
+    sp.regs[SP_STATUS_REG] = 0;
+    sp.rsp_task_locked = 0;
+    s_sp_int_pending = 1;
+    s_rsp_tasks = 0;
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_STATUS_REG, 0x4u, ~0u);   /* CLR_BROKE */
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_STATUS_REG, 0x1u, ~0u);   /* CLR_HALT */
+    CHECK(s_rsp_tasks == 0, "SP_STATUS: no replay while the task's SP_INT is pending");
+    s_sp_int_pending = 0;
+    write_rsp_regs(&sp, MM_RSP_REGS + 4u * SP_STATUS_REG, 0x1u, ~0u);
+    CHECK(s_rsp_tasks == 1, "SP_STATUS: CLR_HALT runs the task once SP_INT has fired");
+
+    /* VI_V_SYNC */
+    memset(&vi, 0, sizeof(vi));
+    vi.mi = &s_mi;
+    vi.clock = 48681812;
+    vi.expected_refresh_rate = 60;
+    write_vi_regs(&vi, MM_VI_REGS + 4u * VI_V_SYNC_REG, 0xfffff20du, ~0u);
+    CHECK(vi.regs[VI_V_SYNC_REG] == 0x20du && vi.count_per_scanline != 0,
+          "VI: V_SYNC keeps ten bits");
+
+    /* AI_LEN with the FIFO full */
+    memset(&ai, 0, sizeof(ai));
+    ai.mi = &s_mi;
+    ai.ri = &ri;
+    ai.vi = &vi;
+    ai.dma_modifier = 100;
+    ai.regs[AI_STATUS_REG] = UINT32_C(0xc0000000);       /* busy, full */
+    ai.regs[AI_DRAM_ADDR_REG] = 0x2000;
+    ai.fifo[1].address = 0x1000;
+    ai.fifo[1].length = 0x100;
+    write_ai_regs(&ai, MM_AI_REGS + 4u * AI_LEN_REG, 0x200u, ~0u);
+    CHECK(ai.fifo[1].address == 0x1000 && ai.fifo[1].length == 0x100,
+          "AI: AI_LEN with both FIFO slots taken is dropped");
+
+    free(rdram.dram);
+}
+
 int main(void)
 {
     test_debug_message();
@@ -457,6 +804,12 @@ int main(void)
     test_pi_dma();
     test_sram();
     test_dd_buffers();
+    test_dpc_clock();
+    test_si_dma();
+    test_sp_dma();
+    test_rsp_task_env();
+    test_is_viewer();
+    test_device_writes();
 
     if (s_failures) {
         printf("test_rcp_bounds: %d failure(s)\n", s_failures);

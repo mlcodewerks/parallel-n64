@@ -14,6 +14,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "rdp_emit_rsp.h"
+/* RSP_NO_SSE2 selects the scalar attribute loop (the tests build both) */
+#if !defined(RSP_NO_SSE2) && (defined(__SSE2__) || defined(_M_X64) \
+    || defined(_M_AMD64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#include <emmintrin.h>
+#define RSP_SSE2 1
+#endif
 
 /* 11-bit divide result look-up table (VRCP family), from cxd4. */
 static const uint16_t div_rom[1024] = {
@@ -149,6 +155,22 @@ static const uint16_t div_rom[1024] = {
 
 /* ---- VRCP family ----------------------------------------------------- */
 
+/* leading zeros of a nonzero word: the divide unit's normalization shift */
+static int rsp_clz32(uint32_t x)
+{
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_clz(x);
+#else
+    int n = 0;
+    if (!(x & 0xffff0000u)) { n += 16; x <<= 16; }
+    if (!(x & 0xff000000u)) { n += 8;  x <<= 8; }
+    if (!(x & 0xf0000000u)) { n += 4;  x <<= 4; }
+    if (!(x & 0xc0000000u)) { n += 2;  x <<= 2; }
+    if (!(x & 0x80000000u)) { n += 1; }
+    return n;
+#endif
+}
+
 /* Core of the RSP divide unit: the input is the sign-extended DivIn (the
  * full 32-bit value for the double-precision vrcph/vrcpl pair, or the
  * sign-extended 16-bit element for single-precision vrcp). Returns the
@@ -163,7 +185,7 @@ static int32_t rsp_div_core(int32_t in32)
     if (data < 0)
         data = (data >= -32768) ? -data : ~data;
 
-    /* Normalize in unsigned arithmetic: the loop shifts the operand's
+    /* Normalize in unsigned arithmetic: the shift moves the operand's
      * leading one up into bit 31, and doing that on a signed int is a
      * signed overflow the optimizer may assume away -- at -O2 the value-
      * range assumption perturbed the reciprocal, and with it every
@@ -173,8 +195,8 @@ static int32_t rsp_div_core(int32_t in32)
         uint32_t ua = (uint32_t)data;
         if (data != 0)
         {
-            for (shift = 0; (ua & 0x80000000u) == 0u; ua <<= 1, shift++)
-                ;
+            shift = rsp_clz32(ua);
+            ua <<= shift;
         }
         addr = (int32_t)((ua >> 22) & 0x1ffu);
     }
@@ -219,7 +241,7 @@ int32_t rsp_rsq32(int32_t in32)
     if (data < 0)
         data = (data >= -32768) ? -data : ~data;
 
-    /* Normalize in unsigned arithmetic: the loop shifts the operand's
+    /* Normalize in unsigned arithmetic: the shift moves the operand's
      * leading one up into bit 31, and doing that on a signed int is a
      * signed overflow the optimizer may assume away -- at -O2 the value-
      * range assumption perturbed the reciprocal, and with it every
@@ -229,8 +251,8 @@ int32_t rsp_rsq32(int32_t in32)
         uint32_t ua = (uint32_t)data;
         if (data != 0)
         {
-            for (shift = 0; (ua & 0x80000000u) == 0u; ua <<= 1, shift++)
-                ;
+            shift = rsp_clz32(ua);
+            ua <<= shift;
         }
         addr = (int32_t)((ua >> 22) & 0x1ffu);
     }
@@ -338,6 +360,281 @@ static Rsp32 mac32(Rsp32 a, Rsp32 b, RspAcc *acc_out)
     return o;
 }
 
+/* ---- S2DEX 1.x object writers ------------------------------------------ */
+
+/* One X or Y lane group of the S2DEX RECTANGLE_R writer: the object
+ * position through the BaseScale reciprocal and matrix translation, the
+ * extent through the step reciprocal, the screen clip and the texture
+ * start walked across a clipped edge. out = {start, end, tex, step}.
+ * Returns 0 when the span is empty. truncate drops the fraction carry
+ * into the end point (the S2DEX 1.x build). */
+int rsp_s2dex_rect_axis(int obj, int scale, int extent, int base_scale,
+                        int trans, const int16_t c[6], int flip,
+                        int clip_min, int clip_max, int frac_scale,
+                        int truncate, int out[4])
+{
+    Rsp32 base_rcp = mk32(rsp_rcp16(base_scale)), pos, eff, span, rcp, delta;
+    RspAcc acc;
+    int start, finish, step, tex, coord_frac, sum, lo, hi, frac;
+    acc = p_udn(1, base_rcp.i) + p_udn(base_rcp.f, 1);
+    base_rcp.f = acc_clamp_low(acc);
+    acc += p_udh(base_rcp.i, 1);
+    base_rcp.i = acc_clamp_mid(acc);
+    acc = p_udm(obj, 0x0800);
+    pos.i = acc_clamp_mid(acc);
+    pos.f = acc_clamp_low(acc);
+    pos = mac32(pos, base_rcp, &acc);
+    coord_frac = pos.f;
+    acc = (acc & ~(RspAcc)0xffff)
+        | U16(clamp_s16(S16(trans) + c[2]) & U16(c[3]));
+    acc += p_udn(pos.i, 1);
+    start = S16(acc_clamp_low(acc));
+    acc = p_udm(base_scale, 0x40);
+    eff.i = acc_clamp_mid(acc);
+    eff.f = acc_clamp_low(acc);
+    acc = p_udn(eff.f, scale) + p_udh(eff.i, scale);
+    step = S16(acc_clamp_mid(acc));
+    rcp = mk32(rsp_rcp16(step));
+    sum = U16(rcp.f) + U16(rcp.i);
+    rcp.f = U16(sum);
+    rcp.i = U16(clamp_s16(S16(rcp.i) + (sum >> 16)));
+    acc = p_udn(clamp_s16(S16(extent) - c[1]), 0x100);
+    delta.i = acc_clamp_mid(acc);
+    delta.f = acc_clamp_low(acc);
+    span = mac32(delta, rcp, &acc);
+    sum = U16(coord_frac) + U16(span.f);
+    finish = clamp_s16(start + S16(span.i) + (truncate ? 0 : (sum >> 16)));
+    if (finish > clip_max)
+        finish = clip_max;
+    tex = c[0];
+    if (flip)
+    {
+        acc = (acc & ~(RspAcc)0xffff)
+            | U16(clamp_s16(c[0] + clamp_s16(S16(extent) - c[1])));
+        tex = S16(acc_clamp_low(acc + p_udn(1, -1)));
+        step = S16(0 - step);
+    }
+    tex = clamp_s16(tex + c[4]);
+    lo = clamp_s16(start - clip_min);
+    if (start >= clip_min)
+        lo = 0;
+    else
+        start = clip_min;
+    if (start >= finish)
+        return 0;
+    acc = p_udh(lo, step);
+    lo = (int)((uint64_t)acc >> 16) & 0xffff;
+    hi = (int)((uint64_t)acc >> 32) & 0xffff;
+    acc = p_udl(lo, -512) + p_udm(hi, -512) + p_udn(lo, -1);
+    acc += p_udn(1, tex);
+    tex = S16(acc_clamp_low(acc));
+    frac = U16(start) & U16(c[5]);
+    /* the Y lanes scale the fraction by 0x200, the X lanes by zero */
+    frac = clamp_s16(frac * frac_scale);
+    acc = p_udm(step, frac);
+    tex = clamp_s16(tex - S16(acc_clamp_mid(acc)));
+    out[0] = start;
+    out[1] = finish;
+    out[2] = tex;
+    out[3] = step;
+    return 1;
+}
+
+/* The S2DEX 1.x sprite overlay's four corners: S, T, screen X, screen Y
+ * per corner, through the object matrix, each pair sorted by Y. obj =
+ * {objX, scaleW, imageW, objY, scaleH, imageH}; matrix = {A, B, C, D, X,
+ * Y}. */
+void rsp_s2dex_sprite_corners(int16_t out[4][4], const int obj[6],
+                              const int32_t matrix[6], unsigned int mode,
+                              unsigned int flags)
+{
+    static const uint32_t corrections[8] = {
+        0, 0x00100020, 0x00200040, 0x00300060,
+        0x0000fff4, 0x00100014, 0x00200034, 0x00300054 };
+    static const unsigned char order[4][8] = {
+        {1,0,0,1,0,1,0,1}, {0,1,1,0,0,1,0,1},
+        {0,1,1,0,1,0,1,0}, {1,0,0,1,1,0,1,0} };
+    int xy[2][4], st[2][4], extent, span, origin, mask, axis, k, swap, j;
+    unsigned int select = (((uint32_t)matrix[2] >> 31) ^ ((uint32_t)matrix[3] >> 31))
+                        | (((uint32_t)matrix[3] >> 31) << 1);
+    uint32_t correction = corrections[(mode >> 4) & 7];
+    Rsp32 r, scaled;
+    RspAcc a;
+    for (axis = 0; axis < 2; axis++)
+    {
+        r = mk32(rsp_rcp16(obj[axis * 3 + 1]));
+        k = U16(r.f) + U16(r.i);
+        r.f = U16(k);
+        r.i = clamp_s16(S16(r.i) + (k >> 16));
+        extent = clamp_s16(S16(obj[axis * 3 + 2]) - S16(correction));
+        a = p_udl(extent, r.f) + p_udm(extent, r.i);
+        scaled.i = acc_clamp_mid(a);
+        scaled.f = acc_clamp_low(a);
+        a = p_udm(scaled.i, 0x100) + p_udl(scaled.f, 0x100);
+        span = acc_clamp_low(a);
+        origin = clamp_s16(S16(correction >> 16) + ((mode & 8) ? -16 : 0));
+        for (k = 0; k < 4; k++)
+        {
+            mask = order[select][axis * 4 + k];
+            xy[axis][k] = S16(acc_clamp_mid(p_udh(1, obj[axis * 3]) + p_udh(mask, span)));
+            mask ^= !!(flags & (axis ? 16 : 1));
+            st[axis][k] = S16(acc_clamp_mid(p_udh(1, origin) + p_udh(mask, extent)));
+        }
+    }
+    for (k = 0; k < 4; k++)
+    {
+        out[k][0] = (int16_t)st[0][k];
+        out[k][1] = (int16_t)st[1][k];
+        for (axis = 0; axis < 2; axis++)
+        {
+            int trans = clamp_s16(S16(matrix[4 + axis]) + ((mode & 8) ? 0 : 1))
+                      & ((mode & 8) ? 0xffff : 0xfffc);
+            int32_t x = matrix[axis * 2], y = matrix[axis * 2 + 1];
+            a = p_udh(1, trans) + p_udm(xy[0][k], x) + p_udh(xy[0][k], (int32_t)((uint32_t)x >> 16));
+            a += p_udm(xy[1][k], y) + p_udh(xy[1][k], (int32_t)((uint32_t)y >> 16));
+            out[k][axis + 2] = (int16_t)acc_clamp_mid(a);
+        }
+    }
+    /* the overlay sorts the two corner pairs by Y, carrying S/T along */
+    for (k = 0; k < 4; k += 2)
+    {
+        swap = out[k][3] >= out[k + 1][3];
+        if (swap)
+            for (j = 0; j < 4; j++)
+            {
+                int16_t v = out[k][j];
+                out[k][j] = out[k + 1][j];
+                out[k + 1][j] = v;
+            }
+    }
+}
+
+/* The sprite overlay's own affine, unshaded triangle writer (a 24-word
+ * TEXTURE_TRIANGLE): S, T, a constant W and screen Y as its attributes,
+ * with its own edge and gradient arithmetic. */
+void rsp_s2dex_sprite_triangle(int32_t packet[24], const int16_t h[4],
+                               const int16_t m[4], const int16_t l[4],
+                               unsigned int tile)
+{
+    int32_t hv[7], mv[7], lv[7], lh[7], mh[7], hm[7], lm[7];
+    Rsp32 edge_rcp[3], edge[3], dx[7], dy[7], de[7], base[7];
+    Rsp32 cross, inv, numer, temp, q;
+    RspAcc a, area;
+    int k, j, norm, sum, frac, offset, sign;
+    for (k = 0; k < 7; k++)
+    {
+        hv[k] = k < 3 ? h[2] : k == 3 ? h[0] : k == 4 ? h[1] : k == 5 ? 0x7fff : h[3];
+        mv[k] = k < 3 ? m[2] : k == 3 ? m[0] : k == 4 ? m[1] : k == 5 ? 0x7fff : m[3];
+        lv[k] = k < 3 ? l[2] : k == 3 ? l[0] : k == 4 ? l[1] : k == 5 ? 0x7fff : l[3];
+        lh[k] = clamp_s16(lv[k] - hv[k]);
+        mh[k] = clamp_s16(mv[k] - hv[k]);
+        hm[k] = clamp_s16(hv[k] - mv[k]);
+        lm[k] = clamp_s16(lv[k] - mv[k]);
+    }
+    area = p_udh(lh[2], mh[6]) + p_udh(hm[2], lh[6]);
+    sign = (int)(((uint64_t)area >> 47) & 1);
+    {
+        int64_t top = (int64_t)area >> 32;
+        norm = (top > -8 && top < 8) ? 0x8000 : 0x100;
+    }
+    cross.i = (int32_t)(((uint64_t)area >> 32) & 0xffff);
+    cross.f = (int32_t)(((uint64_t)area >> 16) & 0xffff);
+    a = p_udl(cross.f, norm) + p_udm(cross.i, norm);
+    cross.i = acc_clamp_mid(a);
+    cross.f = acc_clamp_low(a);
+    inv = mk32(rsp_rcp32(r32(cross)));
+    for (j = 0; j < 3; j++)
+    {
+        int delta = j == 0 ? lh[6] : j == 1 ? mh[6] : lm[6];
+        int dxv = j == 0 ? lh[2] : j == 1 ? mh[2] : lm[2];
+        edge_rcp[j] = mk32(rsp_rcp16(delta));
+        sum = U16(edge_rcp[j].f) + U16(edge_rcp[j].i);
+        edge_rcp[j].f = U16(sum);
+        edge_rcp[j].i = clamp_s16(S16(edge_rcp[j].i) + (sum >> 16));
+        a = p_udn(edge_rcp[j].f, 2);
+        temp.f = acc_clamp_low(a);
+        a += p_udh(edge_rcp[j].i, 2);
+        temp.i = acc_clamp_mid(a);
+        edge_rcp[j] = temp;
+        a = p_udl(temp.f, delta) + p_udm(temp.i, delta);
+        temp.i = acc_clamp_mid(a);
+        temp.f = acc_clamp_low(a);
+        sum = 0 - U16(temp.f);
+        temp.f = U16(sum);
+        temp.i = clamp_s16(2 - S16(temp.i) - (sum < 0));
+        edge_rcp[j] = mac32(edge_rcp[j], temp, 0);
+        a = p_udn(edge_rcp[j].f, dxv);
+        a += p_udh(edge_rcp[j].i, dxv);
+        edge[j].i = (int32_t)(((uint64_t)a >> 32) & 0xffff);
+        edge[j].f = (int32_t)(((uint64_t)a >> 16) & 0xffff);
+    }
+    offset = -(hv[6] & 3);
+    for (k = 0; k < 7; k++)
+    {
+        a = p_udh(lh[k], mh[6]) + p_udh(hm[k], lh[6]);
+        numer.i = (int32_t)(((uint64_t)a >> 32) & 0xffff);
+        numer.f = (int32_t)(((uint64_t)a >> 16) & 0xffff);
+        dx[k] = mac32(numer, inv, 0);
+        a = p_udh(mh[k], lh[2]) + p_udh(lh[k], hm[2]);
+        numer.i = (int32_t)(((uint64_t)a >> 32) & 0xffff);
+        numer.f = (int32_t)(((uint64_t)a >> 16) & 0xffff);
+        dy[k] = mac32(numer, inv, 0);
+        a = p_udl(dx[k].f, norm) + p_udm(dx[k].i, norm);
+        dx[k].i = acc_clamp_mid(a);
+        dx[k].f = acc_clamp_low(a);
+        a = p_udn(dx[k].f, 8);
+        dx[k].f = acc_clamp_low(a);
+        a += p_udh(dx[k].i, 8);
+        dx[k].i = acc_clamp_mid(a);
+        a = p_udl(dy[k].f, norm) + p_udm(dy[k].i, norm);
+        dy[k].i = acc_clamp_mid(a);
+        dy[k].f = acc_clamp_low(a);
+        a = p_udn(dy[k].f, 8);
+        dy[k].f = acc_clamp_low(a);
+        a += p_udh(dy[k].i, 8);
+        dy[k].i = acc_clamp_mid(a);
+        mac32(dx[k], edge[0], &a);
+        a += p_udn(dy[k].f, 1);
+        de[k].f = acc_clamp_low(a);
+        a += p_udh(dy[k].i, 1);
+        de[k].i = acc_clamp_mid(a);
+        temp = mk32((int32_t)((uint32_t)offset * 0x4000u));
+        a = p_udh(hv[k], 1) + p_udl(de[k].f, temp.f) + p_udm(de[k].i, temp.f);
+        a += p_udn(de[k].f, temp.i);
+        base[k].f = acc_clamp_low(a);
+        a += p_udh(de[k].i, temp.i);
+        base[k].i = acc_clamp_mid(a);
+    }
+    /* TEXTURE_TRIANGLE: command 0x0a, left-major flag, tile in bits 16..18 */
+    packet[0] = (int32_t)(((0x0a00u | ((unsigned int)sign << 7) | (tile & 7u)) << 16)
+                          | (uint16_t)lv[6]);
+    packet[1] = (int32_t)(((uint32_t)(uint16_t)mv[6] << 16) | (uint16_t)hv[6]);
+    packet[2] = (int32_t)((uint32_t)mv[2] << 14);
+    packet[3] = r32(edge[2]);
+    q.i = 0;
+    q.f = 0x4000;
+    temp = mac32(edge[0], q, 0);
+    a = p_udn(0x4000, hv[2]) + p_udn(temp.f, offset) + p_udh(temp.i, offset);
+    packet[4] = (int32_t)(((uint32_t)U16(acc_clamp_mid(a)) << 16) | U16(acc_clamp_low(a)));
+    packet[5] = r32(edge[0]);
+    temp = mac32(edge[1], q, 0);
+    a = p_udn(0x4000, hv[2]) + p_udn(temp.f, offset) + p_udh(temp.i, offset);
+    sum = U16(acc_clamp_low(a)) + (S16(edge[0].i) < 0 ? 0 : 1);
+    frac = U16(sum);
+    packet[6] = (int32_t)(((uint32_t)U16(clamp_s16(S16(acc_clamp_mid(a)) + (sum >> 16))) << 16) | (uint32_t)frac);
+    packet[7] = r32(edge[1]);
+    for (j = 0; j < 4; j++)
+    {
+        Rsp32 *v = j == 0 ? base : j == 1 ? dx : j == 2 ? de : dy;
+        int at = 8 + (j / 2) * 8 + (j % 2) * 2;
+        for (k = 0; k < 2; k++)
+        {
+            packet[at + k] = (int32_t)(((uint32_t)U16(v[3 + k * 2].i) << 16) | U16(v[4 + k * 2].i));
+            packet[at + 4 + k] = (int32_t)(((uint32_t)U16(v[3 + k * 2].f) << 16) | U16(v[4 + k * 2].f));
+        }
+    }
+}
+
 /* ---- vertex 1/w ------------------------------------------------------- */
 
 /* The vertex-processing reciprocal: raw vrcp32, then the microcode's
@@ -404,12 +701,17 @@ static int32_t acc_read_unsigned(RspAcc a)
  * normalizes, the result is scaled by 0x100, and the s8 the microcode
  * stores with spv is the top byte of the integer lane. mv is the s15.16
  * modelview matrix; dir/out are s8 triples. */
-void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
-                            const int32_t dir[3], int32_t out[3])
+/* legacy: the early GBI 1 build (GoldenEye 007, Perfect Dark). Its rotate
+ * multiplies the direction as s8 * 128, folds the fraction products
+ * through a doubling VMUDM and saturates the integer sum; it scales the
+ * reciprocal square root by 64 and packs the normalized lane from a
+ * clamped low half instead of the x 0x100 round. */
+static void light_dir_xfrm3(const int32_t mv[4][4], const int32_t dir[3],
+                            int32_t out[3], int legacy)
 {
     int32_t t_mid[3], t_hi[3];
     int32_t sq_lo[3], sq_mid[3];
-    int32_t lo, ci, si;
+    int32_t lo, si;
     Rsp32 r;
     int L;
 
@@ -417,6 +719,20 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
     {
         RspAcc acc = 0;
         int ax;
+        if (legacy)
+        {
+            RspAcc integer = 0;
+            for (ax = 0; ax < 3; ax++)
+            {
+                int32_t dl = (int32_t)(int8_t)dir[ax] * 128;
+                acc += p_udn(mv[L][ax] & 0xffff, dl);
+                integer += 2 * (RspAcc)S16(mv[L][ax] >> 16) * dl;
+            }
+            acc = p_udm(acc_clamp_mid(acc), 2) + integer;
+            t_mid[L] = acc_clamp_low(acc);
+            t_hi[L] = acc_read_signed(acc);
+            continue;
+        }
         for (ax = 0; ax < 3; ax++)
         {
             int32_t d = (int32_t)(int16_t)((dir[ax] & 0xff) << 8);
@@ -450,6 +766,12 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
         si = clamp_s16(si + S16(sq_mid[2]) + carry);
     }
     r = mk32(rsp_rsq32((int32_t)(((uint32_t)U16(si) << 16) | (uint32_t)U16(lo))));
+    if (legacy)
+    {
+        RspAcc a = p_udl(r.f, 64) + p_udm(r.i, 64);
+        r.i = acc_clamp_mid(a);
+        r.f = acc_clamp_low(a);
+    }
     for (L = 0; L < 3; L++)
     {
         int32_t n_lo, n_mid;
@@ -459,12 +781,36 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
         n_lo = acc_clamp_low(acc);
         acc += p_udh(t_hi[L], r.i);
         n_mid = acc_clamp_mid(acc);
-        /* x 0x100 (vmudn / vmadh), then spv stores the int lane's top byte */
-        acc = p_udn(n_lo, 0x100);
-        acc += p_udh(n_mid, 0x100);
-        n_mid = acc_clamp_mid(acc);
+        if (legacy)
+        {
+            int32_t value = S16(n_lo);
+            if (value < -8191)
+                value = -8191;
+            if (value > 8191)
+                value = 8191;
+            n_mid = acc_clamp_low(p_udn(value, 4));
+        }
+        else
+        {
+            /* x 0x100 (vmudn / vmadh), then spv stores the int lane's top byte */
+            acc = p_udn(n_lo, 0x100);
+            acc += p_udh(n_mid, 0x100);
+            n_mid = acc_clamp_mid(acc);
+        }
         out[L] = (int32_t)(signed char)((n_mid >> 8) & 0xff);
     }
+}
+
+void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
+                            const int32_t dir[3], int32_t out[3])
+{
+    light_dir_xfrm3(mv, dir, out, 0);
+}
+
+void rsp_light_dir_xfrm_legacy(const int32_t mv[4][4],
+                               const int32_t dir[3], int32_t out[3])
+{
+    light_dir_xfrm3(mv, dir, out, 1);
 }
 
 /* The ZSortBOSS TRANSFORMLIGHTS normalize (IMEM 0x570): like the F3DEX2
@@ -599,6 +945,41 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
         out[c] = (lt[c] >> 7) & 0xff;
 }
 
+/* The early GBI 1 lighting loop: each axis product is rounded before the
+ * two saturating VADDs of the dot, and each light's colour contribution is
+ * rounded and clamped at zero on its own, one light at a time from the
+ * top. */
+void rsp_light_vtx_legacy(const int32_t n[3], const int32_t amb[3],
+                          const int32_t (*rgb)[3], const int32_t (*dirs)[3],
+                          int num, int32_t out[3])
+{
+    int i, c;
+    int32_t colour[3];
+    for (c = 0; c < 3; c++)
+        colour[c] = (amb[c] & 255) << 7;
+    for (i = num - 1; i >= 0; i--)
+    {
+        int axis;
+        int32_t dot = 0;
+        for (axis = 0; axis < 3; axis++)
+        {
+            RspAcc acc = 2 * (RspAcc)(int16_t)((n[axis] & 255) << 8)
+                       * (int16_t)((dirs[i][axis] & 255) << 8) + 0x8000;
+            dot = clamp_s16(dot + S16(acc_read_signed(acc)));
+        }
+        for (c = 0; c < 3; c++)
+        {
+            RspAcc acc = 2 * (RspAcc)((rgb[i][c] & 255) << 7) * dot + 0x8000;
+            int32_t contribution = S16(acc_read_signed(acc));
+            if (contribution < 0)
+                contribution = 0;
+            colour[c] = clamp_s16(colour[c] + contribution);
+        }
+    }
+    for (c = 0; c < 3; c++)
+        out[c] = (colour[c] >> 7) & 255;
+}
+
 /* ---- positional lighting (light_point) -------------------------------- */
 
 /* Exported single directional dot for the positional-mode loop, which
@@ -607,6 +988,130 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
 int32_t rsp_light_dirdot(const int32_t n[3], const int32_t d[3])
 {
     return rsp_light_dot(n, d);
+}
+
+/* ---- Conker's Bad Fur Day (F3DEXBG) lighting -------------------------- */
+
+/* vaddc/vadd 32-bit pair add: the fraction wraps with a carry out, the
+ * integer saturates. */
+static Rsp32 addv32(Rsp32 a, Rsp32 b)
+{
+    Rsp32 o;
+    int carry = ((U16(a.f) + U16(b.f)) > 0xffff);
+    o.f = (a.f + b.f) & 0xffff;
+    o.i = clamp_s16(S16(a.i) + S16(b.i) + carry) & 0xffff;
+    return o;
+}
+
+/* F3DEXBG's point-light overlay. The vertex's clip-space position goes
+ * through the G_MW_COORD_MOD offset (rows 8..11) and 16.16 scale (rows
+ * 0..3 integer, 4..7 fraction); each light below the top one contributes
+ * min(rgb, rgb * ca / |p - light|^2) over a four-lane distance, W
+ * included, with the DIV-table reciprocal; the sum, starting from the
+ * ambient in the top slot, then modulates the vertex's own colour
+ * (VMULF, SUV). The normal-indexed build also dots the light below the
+ * ambient against the vertex normal and, with G_LIGHTING_POSITIONAL,
+ * folds the point lights in pairs gated by their own dots. */
+static void cbfd_light(const int32_t clip[4], const int32_t coord[16],
+                       const int32_t (*positions)[4], const int32_t (*rgb)[3],
+                       const int32_t *attenuation, int num,
+                       const int32_t source[3], const int32_t *normal,
+                       const int32_t (*directions)[3], int positional,
+                       int32_t out[3])
+{
+    int32_t position[4], colour[3];
+    int32_t previous[3];
+    int k, light;
+
+    previous[0] = previous[1] = previous[2] = 0;
+    for (k = 0; k < 4; k++)
+    {
+        Rsp32 p = mk32(clip[k]), scale;
+        p.i = clamp_s16(S16(p.i) + S16(coord[8 + k]));
+        scale.i = coord[k];
+        scale.f = coord[4 + k];
+        position[k] = S16(mac32(p, scale, 0).i);
+    }
+    for (k = 0; k < 3; k++)
+        colour[k] = (rgb[num][k] & 255) << 7;
+    if (normal && num > 0)
+    {
+        RspAcc dot_acc = 0x8000;
+        int32_t dot;
+        for (k = 0; k < 3; k++)
+            dot_acc += (RspAcc)S16((normal[k] & 255) << 8)
+                     * S16((directions[num - 1][k] & 255) << 8) * 2;
+        /* this light feeds VMACF without the point loop's 0x7fff mask, so
+         * an unsigned overflow of 0xffff is a signed -1 */
+        dot = S16(acc_read_unsigned(dot_acc));
+        for (k = 0; k < 3; k++)
+            colour[k] = S16(acc_clamp_mid((RspAcc)colour[k] * 0x7fff * 2 + 0x8000
+                    + (RspAcc)((rgb[num - 1][k] & 255) << 7) * dot * 2));
+    }
+    for (light = num - 2; light >= 0; --light)
+    {
+        Rsp32 square[4], distance, reciprocal, ca, factor;
+        for (k = 0; k < 4; k++)
+        {
+            int32_t d = clamp_s16(position[k] - S16(positions[light][k]));
+            square[k] = mk32((int32_t)(uint32_t)(d * d));
+        }
+        distance = addv32(addv32(square[0], square[1]),
+                          addv32(square[2], square[3]));
+        reciprocal = mk32(rsp_rcp32((int32_t)(((uint32_t)U16(distance.i) << 16)
+                                              | (uint32_t)U16(distance.f))));
+        ca = mk32((attenuation[light] & 255) << 12);
+        factor = mac32(reciprocal, ca, 0);
+        for (k = 0; k < 3; k++)
+        {
+            int32_t limit = (rgb[light][k] & 255) << 7;
+            RspAcc acc = p_udm(limit, factor.f) + p_udh(limit, factor.i);
+            int32_t contribution = S16(acc_clamp_mid(acc));
+            if (contribution > limit)
+                contribution = limit;
+            if (normal && positional)
+            {
+                if (light & 1)
+                    previous[k] = contribution;
+                else
+                {
+                    int32_t dot1 = rsp_light_dot(normal, directions[light + 1]);
+                    int32_t dot2 = rsp_light_dot(normal, directions[light]);
+                    RspAcc fold = (RspAcc)S16(colour[k]) * 0x7fff * 2 + 0x8000;
+                    fold += (RspAcc)previous[k] * dot1 * 2
+                          + (RspAcc)contribution * dot2 * 2;
+                    colour[k] = S16(acc_clamp_mid(fold));
+                }
+            }
+            else
+                colour[k] = clamp_s16(colour[k] + contribution);
+        }
+    }
+    for (k = 0; k < 3; k++)
+    {
+        RspAcc acc = (RspAcc)S16(colour[k]) * ((source[k] & 255) << 7) * 2 + 0x8000;
+        out[k] = (U16(acc_clamp_mid(acc)) >> 7) & 255;
+    }
+}
+
+void rsp_cbfd_light(const int32_t clip[4], const int32_t coord[16],
+                    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+                    const int32_t *attenuation, int num,
+                    const int32_t source[3], int32_t out[3])
+{
+    cbfd_light(clip, coord, positions, rgb, attenuation, num, source,
+               0, 0, 0, out);
+}
+
+void rsp_cbfd_light_normal(const int32_t clip[4], const int32_t coord[16],
+                           const int32_t (*positions)[4], const int32_t (*rgb)[3],
+                           const int32_t *attenuation, int num,
+                           const int32_t source[3], const int32_t normal[3],
+                           const int32_t (*directions)[3], int positional,
+                           int32_t out[3])
+{
+    cbfd_light(clip, coord, positions, rgb, attenuation, num, source,
+               normal, directions, positional, out);
 }
 
 /* One positional-loop color fold: vmulf(color, 0x7FFF) decays the running
@@ -844,6 +1349,17 @@ void rsp_set_clip_lerp_l3dex(int on)
     s_clip_lerp_seed3 = on ? 1 : 0;
 }
 
+/* Rare's GBI 1 clip build (GoldenEye 007, Perfect Dark): the l3dex
+ * refinement, with the +3 seed on the final factor multiply only and the
+ * doubled second reciprocal re-latched after its high term, and a factor
+ * clamp of VEQ(high, 0) then VNE(low, 0) rather than signed range
+ * compares. */
+void rsp_set_clip_lerp_gbi1(void)
+{
+    s_clip_lerp_l3dex = 1;
+    s_clip_lerp_seed3 = 2;
+}
+
 static int s_vtx_invw_2rd = 0;
 static int s_tri_attr_rs = 0;
 static int s_tri_attr_zboss = 0;
@@ -878,6 +1394,23 @@ void rsp_set_vtx_invw_2rd(int on)
 }
 
 static int s_vtx_invw_raw = 0;
+
+/* Fast3D vertex write (GoldenEye, Perfect Dark, Mario Kart 64): the
+ * shared reciprocal routine doubles the raw table result (re-latching the
+ * fraction after the integer term) and refines it as r * (2 - r * w')
+ * against the DMEM 0x60 row of 2s; the position takes the reciprocal with
+ * its integer clamped to 0x7fff when negative (vge/vmrg against v30[0]);
+ * and the stored screen integers are clamped by the vge/vlt pair against
+ * the data row at 0x28: x and y to [lo, hi], z to [0, 0x7fff]. */
+static int s_vtx_f3d = 0;
+static int32_t s_vtx_f3d_lo = -4090, s_vtx_f3d_hi = 4090;
+
+void rsp_set_vtx_f3d(int on, int32_t clamp_lo, int32_t clamp_hi)
+{
+    s_vtx_f3d = on ? 1 : 0;
+    s_vtx_f3d_lo = clamp_lo;
+    s_vtx_f3d_hi = clamp_hi;
+}
 
 void rsp_set_vtx_invw_raw(int on)
 {
@@ -1084,7 +1617,7 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
      * F3DEX2 chain does not have. It is what keeps a generated vertex
      * on the inside of the plane it was clipped against, which in turn
      * decides the stored quarter-pixel at a screen edge. */
-    acc = s_clip_lerp_seed3 ? 3 : 0;
+    acc = (s_clip_lerp_seed3 == 1) ? 3 : 0;
     acc += p_udl(v10[3], rcp_lo) + p_udm(v11[3], rcp_lo);
     v11[3] = acc_clamp_mid(acc);
     v10[3] = acc_clamp_low(acc);
@@ -1110,6 +1643,8 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
         r2_lo = acc_clamp_low(acc);
         acc += p_udh(r2_hi, 2);
         r2_hi = acc_clamp_mid(acc);
+        if (s_clip_lerp_seed3 == 2)
+            r2_lo = acc_clamp_low(acc);
         acc = p_udl(r2_lo, v10[3]) + p_udm(r2_hi, v10[3]);
         acc += p_udn(r2_lo, v11[3]);
         x_lo = acc_clamp_low(acc);
@@ -1178,6 +1713,11 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
         ne  = (ff != 1);
         vcc = (fi > 0) | ((fi == 0) & !(ne & cob));
         fade = vcc ? ff : 1;
+        if (s_clip_lerp_seed3 == 2)
+        {
+            ff = (fi == 0) ? U16(v10[3]) : 0xffff;
+            fade = ff ? ff : 1;
+        }
     }
     acc = p_udn(fade, -1);
     onfade = acc_clamp_low(acc);            /* 0x10000 - fade, low half */
@@ -1447,6 +1987,13 @@ int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     return (cw > 0) ? 1 : 0;
 }
 
+/* The stock chain's z lane (z x 1/w' x perspNorm) of the last vertex
+ * rsp_vtx_screen placed: the fog factor runs the same chain on the same
+ * vertex. */
+static int s_fogz_ok;
+static int32_t s_fogz_cz, s_fogz_cw, s_fogz_pn;
+static Rsp32 s_fogz_p2;
+
 int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
                    int32_t pn,
                    int32_t vsx, int32_t vsy, int32_t vsz,
@@ -1461,7 +2008,9 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     RspAcc acc;
     int lane;
 
-    if (cw <= 0)
+    /* the Fast3D vertex write runs for every vertex, behind the eye
+     * included, and its triangle path reads whatever it stored */
+    if (cw <= 0 && !s_vtx_f3d)
         return 0;
 
     pos[0] = mk32(cx);
@@ -1481,7 +2030,24 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
 
     /* 1/w' with the Newton-Raphson step, exactly as rsp_vtx_invw */
     r = mk32(rsp_rcp32((int32_t)(((uint32_t)U16(pw.i) << 16) | (uint32_t)U16(pw.f))));
-    if (s_vtx_invw_raw)
+    if (s_vtx_f3d)
+    {
+        acc = p_udn(r.f, 2);
+        acc += p_udh(r.i, 2);
+        r.i = acc_clamp_mid(acc);
+        r.f = acc_clamp_low(acc);
+        t = mac32(r, pw, 0);
+        {
+            int32_t borrow = (U16(t.f) != 0) ? 1 : 0;
+            u.f = (int32_t)((0 - U16(t.f)) & 0xffff);
+            u.i = 2 - S16(t.i) - borrow;
+            if (u.i > 32767) u.i = 32767;
+            if (u.i < -32768) u.i = -32768;
+            u.i &= 0xffff;
+        }
+        iw = mac32(r, u, 0);
+    }
+    else if (s_vtx_invw_raw)
     {
         /* Turbo3D's reciprocal (gspTurbo3D text +0x538..+0x574): the
          * 32-bit vrcph/vrcpl table result is doubled through the
@@ -1540,24 +2106,47 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
         Rsp32 p1, p2;
         int32_t vs = (lane == 0) ? vsx : (lane == 1) ? -vsy : vsz;
         int32_t vt = (lane == 0) ? vtx_ : (lane == 1) ? vty : vtz;
+        int32_t iwi = iw.i;
 
+        if (s_vtx_f3d && S16(iwi) < 0)
+            iwi = 0x7fff;
         acc = p_udl(pos[lane].f, iw.f);
         acc += p_udm(pos[lane].i, iw.f);
-        acc += p_udn(pos[lane].f, iw.i);
+        acc += p_udn(pos[lane].f, iwi);
         p1.f = acc_clamp_low(acc);
-        acc += p_udh(pos[lane].i, iw.i);
+        acc += p_udh(pos[lane].i, iwi);
         p1.i = acc_clamp_mid(acc);
 
         acc = p_udl(p1.f, pn);
         acc += p_udm(p1.i, pn);
         p2.i = acc_clamp_mid(acc);
         p2.f = acc_clamp_low(acc);
+        if (lane == 2)
+        {
+            s_fogz_ok = !s_vtx_f3d && !s_vtx_invw_raw && !s_vtx_invw_2rd;
+            s_fogz_cz = cz;
+            s_fogz_cw = cw;
+            s_fogz_pn = pn;
+            s_fogz_p2 = p2;
+        }
 
         acc = p_udh(vt, 1);
         acc += p_udn(p2.f, vs);
         scr_f[lane] = acc_clamp_low(acc);
         acc += p_udh(p2.i, vs);
         scr_i[lane] = acc_clamp_mid(acc);
+        if (s_vtx_f3d)
+        {
+            /* the fraction is re-latched after the integer term */
+            scr_f[lane] = acc_clamp_low(acc);
+            if (lane < 2)
+            {
+                if (S16(scr_i[lane]) < s_vtx_f3d_lo)
+                    scr_i[lane] = s_vtx_f3d_lo & 0xffff;
+                if (S16(scr_i[lane]) > s_vtx_f3d_hi)
+                    scr_i[lane] = s_vtx_f3d_hi & 0xffff;
+            }
+        }
     }
 
     *sx102 = (int32_t)(int16_t)scr_i[0];
@@ -1617,6 +2206,11 @@ int32_t rsp_vtx_fog(int32_t cz, int32_t cw, int32_t pn,
     if (cw <= 0)
         return 0;
 
+    if (s_fogz_ok && s_fogz_cz == cz && s_fogz_cw == cw && s_fogz_pn == pn)
+    {
+        p2 = s_fogz_p2;
+        goto shape;
+    }
     {
         Rsp32 w32 = mk32(cw);
         acc = p_udl(w32.f, pn);
@@ -1646,6 +2240,7 @@ int32_t rsp_vtx_fog(int32_t cz, int32_t cw, int32_t pn,
     p2.i = acc_clamp_mid(acc);
     p2.f = acc_clamp_low(acc);
 
+shape:
     acc = p_udh(fog_o, 1);
     acc += p_udh(1, 0x7f00);
     acc += p_udn(p2.f, fog_m);
@@ -1715,17 +2310,6 @@ static Rsp32 sub32(Rsp32 a, Rsp32 b)
     int borrow = (U16(a.f) < U16(b.f));
     o.f = (a.f - b.f) & 0xffff;
     o.i = clamp_s16(S16(a.i) - S16(b.i) - borrow) & 0xffff;
-    return o;
-}
-
-/* vaddc/vadd 32-bit pair add (fraction wraps with carry out, integer
- * saturates). */
-static Rsp32 addv32(Rsp32 a, Rsp32 b)
-{
-    Rsp32 o;
-    int carry = ((U16(a.f) + U16(b.f)) > 0xffff);
-    o.f = (a.f + b.f) & 0xffff;
-    o.i = clamp_s16(S16(a.i) + S16(b.i) + carry) & 0xffff;
     return o;
 }
 
@@ -2322,10 +2906,217 @@ void rsp_tri_set_rs_sort(int on)
     s_rs_lut_sort = on;
 }
 
+static int s_texrecip;
+
+void rsp_tri_set_texrecip(int on)
+{
+    s_texrecip = on;
+}
+
+int rsp_tri_texrecip(void)
+{
+    return s_texrecip;
+}
+
 void rsp_tri_set_d64_sort(int on)
 {
     s_d64_lut_sort = on;
 }
+
+#ifdef RSP_SSE2
+/* ---- the triangle writer's attribute lanes, eight at a time ----------- */
+
+/* The eight r g b a s t w z lanes run the microcode's vector chains; held
+ * as 16-bit slices (h:m:l) of the 48-bit accumulator. These chains never
+ * leave the 47-bit range, so the slices agree with the scalar int64
+ * accumulator everywhere they are read. */
+typedef struct { __m128i h, m, l; } RxAcc;
+
+#define RX_K8000 _mm_set1_epi16((short)0x8000)
+
+/* -1 where sum = a + b carried out of 16 bits */
+static __m128i rx_carry(__m128i sum, __m128i b)
+{
+    return _mm_cmplt_epi16(_mm_xor_si128(sum, RX_K8000), _mm_xor_si128(b, RX_K8000));
+}
+
+/* eight int32 lanes holding 16-bit values into one int16 vector */
+static __m128i rx_pack16(const int32_t *p)
+{
+    __m128i a = _mm_loadu_si128((const __m128i *)(const void *)p);
+    __m128i b = _mm_loadu_si128((const __m128i *)(const void *)(p + 4));
+    a = _mm_srai_epi32(_mm_slli_epi32(a, 16), 16);
+    b = _mm_srai_epi32(_mm_slli_epi32(b, 16), 16);
+    return _mm_packs_epi32(a, b);
+}
+
+/* acc += (hi:lo), a 32-bit product sign-extended */
+static void rx_add32(RxAcc *a, __m128i hi, __m128i lo)
+{
+    __m128i l2 = _mm_add_epi16(a->l, lo);
+    __m128i c1 = rx_carry(l2, lo);
+    __m128i m1 = _mm_add_epi16(a->m, hi);
+    __m128i ca = rx_carry(m1, hi);
+    __m128i m2 = _mm_sub_epi16(m1, c1);
+    __m128i cb = _mm_and_si128(c1, _mm_cmpeq_epi16(m2, _mm_setzero_si128()));
+    a->h = _mm_sub_epi16(_mm_sub_epi16(_mm_add_epi16(a->h, _mm_srai_epi16(hi, 15)), ca), cb);
+    a->m = m2;
+    a->l = l2;
+}
+
+/* acc += (hi:lo) << 16 */
+static void rx_add32_16(RxAcc *a, __m128i hi, __m128i lo)
+{
+    __m128i m2 = _mm_add_epi16(a->m, lo);
+    a->h = _mm_sub_epi16(_mm_add_epi16(a->h, hi), rx_carry(m2, lo));
+    a->m = m2;
+}
+
+/* the products: unsigned s x signed t, signed x signed, signed s x
+ * unsigned t, unsigned x unsigned (high half only) */
+static void rx_mul_us(__m128i s, __m128i t, __m128i *hi, __m128i *lo)
+{
+    *lo = _mm_mullo_epi16(s, t);
+    *hi = _mm_add_epi16(_mm_mulhi_epi16(s, t), _mm_and_si128(t, _mm_srai_epi16(s, 15)));
+}
+
+static void rx_mul_ss(__m128i s, __m128i t, __m128i *hi, __m128i *lo)
+{
+    *lo = _mm_mullo_epi16(s, t);
+    *hi = _mm_mulhi_epi16(s, t);
+}
+
+static void rx_mul_su(__m128i s, __m128i t, __m128i *hi, __m128i *lo)
+{
+    rx_mul_us(t, s, hi, lo);
+}
+
+/* signed clamp of bits 47..16, and the low slice with the 0/0xffff
+ * clamp */
+static __m128i rx_clamp_mid(const RxAcc *a)
+{
+    return _mm_packs_epi32(_mm_unpacklo_epi16(a->m, a->h), _mm_unpackhi_epi16(a->m, a->h));
+}
+
+static __m128i rx_clamp_low(const RxAcc *a)
+{
+    __m128i t = rx_clamp_mid(a);
+    __m128i c = _mm_cmpeq_epi16(t, a->m);
+    return _mm_or_si128(_mm_and_si128(c, a->l),
+                        _mm_andnot_si128(c, _mm_xor_si128(t, RX_K8000)));
+}
+
+/* sub32 on eight lanes: the fraction borrows, the integer clamps */
+static void rx_sub32(__m128i ai, __m128i af, __m128i bi, __m128i bf,
+                     __m128i *oi, __m128i *of)
+{
+    __m128i borrow = _mm_cmplt_epi16(_mm_xor_si128(af, RX_K8000), _mm_xor_si128(bf, RX_K8000));
+    __m128i z = _mm_setzero_si128();
+    __m128i as = _mm_srai_epi16(ai, 15), bs = _mm_srai_epi16(bi, 15);
+    __m128i bw = _mm_srai_epi16(borrow, 15);
+    __m128i lo = _mm_sub_epi32(_mm_sub_epi32(_mm_unpacklo_epi16(ai, as), _mm_unpacklo_epi16(bi, bs)),
+                               _mm_sub_epi32(z, _mm_unpacklo_epi16(bw, bw)));
+    __m128i hi = _mm_sub_epi32(_mm_sub_epi32(_mm_unpackhi_epi16(ai, as), _mm_unpackhi_epi16(bi, bs)),
+                               _mm_sub_epi32(z, _mm_unpackhi_epi16(bw, bw)));
+    *of = _mm_sub_epi16(af, bf);
+    *oi = _mm_packs_epi32(lo, hi);
+}
+
+static void rx_store32(Rsp32 o[8], __m128i i, __m128i f)
+{
+    uint16_t ti[8], tf[8];
+    int k;
+    _mm_storeu_si128((__m128i *)(void *)ti, i);
+    _mm_storeu_si128((__m128i *)(void *)tf, f);
+    for (k = 0; k < 8; k++)
+    {
+        o[k].i = ti[k];
+        o[k].f = tf[k];
+    }
+}
+
+static __m128i rx_load_i(const Rsp32 v[8])
+{
+    int32_t t[8];
+    int k;
+    for (k = 0; k < 8; k++)
+        t[k] = v[k].i;
+    return rx_pack16(t);
+}
+
+static __m128i rx_load_f(const Rsp32 v[8])
+{
+    int32_t t[8];
+    int k;
+    for (k = 0; k < 8; k++)
+        t[k] = v[k].f;
+    return rx_pack16(t);
+}
+
+/* the H->L and H->M attribute deltas and the two cross numerators:
+ * dA_x = dMH.y * dA_H + dHL.y * dA_M and dA_y = dLH.x * dA_M + dHM.x *
+ * dA_H (vmudn/vmadh, the accumulator's raw 47..16 window) */
+static void rx_attr_deltas(const int32_t at_i[3][8], const int32_t at_f[3][8],
+                           int32_t mh_y, int32_t hl_y, int32_t lh_x, int32_t hm_x,
+                           Rsp32 dA_H[8], Rsp32 dA_M[8], Rsp32 dA_x[8], Rsp32 dA_y[8])
+{
+    __m128i a1i = rx_pack16(at_i[0]), a1f = rx_pack16(at_f[0]);
+    __m128i a2i = rx_pack16(at_i[1]), a2f = rx_pack16(at_f[1]);
+    __m128i a3i = rx_pack16(at_i[2]), a3f = rx_pack16(at_f[2]);
+    __m128i hi_, hf, mi, mf, ph, pl;
+    __m128i ky_mh = _mm_set1_epi16((short)mh_y), ky_hl = _mm_set1_epi16((short)hl_y);
+    __m128i kx_lh = _mm_set1_epi16((short)lh_x), kx_hm = _mm_set1_epi16((short)hm_x);
+    RxAcc a;
+    rx_sub32(a3i, a3f, a1i, a1f, &hi_, &hf);
+    rx_sub32(a2i, a2f, a1i, a1f, &mi, &mf);
+    rx_store32(dA_H, hi_, hf);
+    rx_store32(dA_M, mi, mf);
+
+    rx_mul_us(hf, ky_mh, &ph, &pl);
+    a.l = pl; a.m = ph; a.h = _mm_srai_epi16(ph, 15);
+    rx_mul_ss(hi_, ky_mh, &ph, &pl);
+    rx_add32_16(&a, ph, pl);
+    rx_mul_us(mf, ky_hl, &ph, &pl);
+    rx_add32(&a, ph, pl);
+    rx_mul_ss(mi, ky_hl, &ph, &pl);
+    rx_add32_16(&a, ph, pl);
+    rx_store32(dA_x, a.h, a.m);
+
+    rx_mul_us(mf, kx_lh, &ph, &pl);
+    a.l = pl; a.m = ph; a.h = _mm_srai_epi16(ph, 15);
+    rx_mul_ss(mi, kx_lh, &ph, &pl);
+    rx_add32_16(&a, ph, pl);
+    rx_mul_us(hf, kx_hm, &ph, &pl);
+    rx_add32(&a, ph, pl);
+    rx_mul_ss(hi_, kx_hm, &ph, &pl);
+    rx_add32_16(&a, ph, pl);
+    rx_store32(dA_y, a.h, a.m);
+}
+
+/* base = attr(H) + dAdE * y_spx (vmudn/vmadh of H, then vmadl/vmadm/
+ * vmadn with the clamped low read, vmadh with the clamped mid read) */
+static void rx_attr_base(const int32_t at_i0[8], const int32_t at_f0[8],
+                         const Rsp32 dAdE[8], int32_t y_spx_f, int32_t y_spx_i,
+                         Rsp32 base[8])
+{
+    __m128i ei = rx_load_i(dAdE), ef = rx_load_f(dAdE);
+    __m128i yf = _mm_set1_epi16((short)y_spx_f), yi = _mm_set1_epi16((short)y_spx_i);
+    __m128i ph, pl, bf;
+    RxAcc a;
+    a.m = rx_pack16(at_i0);
+    a.l = rx_pack16(at_f0);
+    a.h = _mm_srai_epi16(a.m, 15);
+    rx_add32(&a, _mm_setzero_si128(), _mm_mulhi_epu16(ef, yf));
+    rx_mul_su(ei, yf, &ph, &pl);
+    rx_add32(&a, ph, pl);
+    rx_mul_us(ef, yi, &ph, &pl);
+    rx_add32(&a, ph, pl);
+    bf = rx_clamp_low(&a);
+    rx_mul_ss(ei, yi, &ph, &pl);
+    rx_add32_16(&a, ph, pl);
+    rx_store32(base, rx_clamp_mid(&a), bf);
+}
+#endif
 
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
@@ -2986,15 +3777,26 @@ int rsp_tri_write(int32_t *ew,
         if (iw[2] > max_iw) max_iw = iw[2];
         for (vi = 0; vi < 3; vi++)
         {
+            if (s_texrecip)
+            {
+                /* The FIFO 2.05 normalizer (IMEM 0xa20..0xa48): VRCPH/
+                 * VRCPL of the largest 1/w, then VMUDM/VMADL/VMADN/VMADH
+                 * per vertex, carrying the DIV-table rounding into the
+                 * texture gradients. */
+                wnorm[vi] = mac32(mk32(iw[vi]), mk32(rsp_rcp32(max_iw)), 0);
+                continue;
+            }
             /* Shared per-vertex perspective normalizer.  The LLE RSP emits
              * floor(0x8000 * iw / max) here (equivalently the W lane becomes
              * floor(0x7fff * iw / (2*max))); the raw reciprocal-multiply path
              * biases this high by ~11 ulp, drifting the perspective gradient.
              * Form the quotient directly to match the LLE-emitted value. */
-            int64_t pq = (int64_t)iw[vi] << 15;
-            pq = (max_iw != 0) ? (pq / (int64_t)max_iw) : 0;
-            wnorm[vi].f = (int32_t)(pq & 0xffff);
-            wnorm[vi].i = (int32_t)((pq >> 16) & 0xffff);
+            {
+                int64_t pq = (int64_t)iw[vi] << 15;
+                pq = (max_iw != 0) ? (pq / (int64_t)max_iw) : 0;
+                wnorm[vi].f = (int32_t)(pq & 0xffff);
+                wnorm[vi].i = (int32_t)((pq >> 16) & 0xffff);
+            }
         }
         {
             const RspTriVtx *vv[3];
@@ -3019,6 +3821,7 @@ int rsp_tri_write(int32_t *ew,
     /* ---- attribute deltas and gradients ---- */
     {
     int32_t rs_yspx_vh = (int32_t)U16(vh->y);
+    int32_t rs_mh_y = mh_y, rs_hl_y = hl_y, rs_lh_x = lh_x, rs_hm_x = hm_x;
     Rsp32 zb_elh8;
     zb_elh8.i = 0; zb_elh8.f = 0;
     if (s_tri_attr_zboss)
@@ -3034,7 +3837,6 @@ int rsp_tri_write(int32_t *ew,
         zb_elh8.i = acc_clamp_mid(acc);
         zb_elh8.f = acc_clamp_low(acc);
     }
-    int32_t rs_mh_y = mh_y, rs_hl_y = hl_y, rs_lh_x = lh_x, rs_hm_x = hm_x;
     if (s_tri_attr_rs)
     {
         /* The writer multiplies the packed edge deltas by v30[5] == 4
@@ -3043,6 +3845,36 @@ int rsp_tri_write(int32_t *ew,
         rs_mh_y = clamp_s16(mh_y * 4); rs_hl_y = clamp_s16(hl_y * 4);
         rs_lh_x = clamp_s16(lh_x * 4); rs_hm_x = clamp_s16(hm_x * 4);
     }
+#ifdef RSP_SSE2
+    if (!s_tri_attr_rs && !s_tri_attr_zboss)
+    {
+        /* the stock chain: deltas, numerators and bases eight lanes at a
+         * time, the gradient multiplies on the wide reciprocal per lane */
+        rx_attr_deltas((const int32_t (*)[8])at_i, (const int32_t (*)[8])at_f,
+                       mh_y, hl_y, lh_x, hm_x, dA_H, dA_M, dA_x, dA_y);
+        for (k = 0; k < 8; k++)
+        {
+            if (s_texrecip)
+            {
+                dAdX[k] = mac32(dA_x[k], inv_dx, 0);
+                dAdY[k] = mac32(dA_y[k], inv_dx, &acc);
+            }
+            else
+            {
+                dAdX[k] = mac32_wide(dA_x[k], inv_dx_64, 0);
+                dAdY[k] = mac32_wide(dA_y[k], inv_dx_64, &acc);
+            }
+            acc += p_udl(dAdX[k].f, dxhdy.f);
+            acc += p_udm(dAdX[k].i, dxhdy.f);
+            acc += p_udn(dAdX[k].f, dxhdy.i);
+            dAdE[k].f = acc_clamp_low(acc);
+            acc += p_udh(dAdX[k].i, dxhdy.i);
+            dAdE[k].i = acc_clamp_mid(acc);
+        }
+        rx_attr_base(at_i[0], at_f[0], dAdE, y_spx_f, y_spx_i, base);
+    }
+    else
+#endif
     for (k = 0; k < 8; k++)
     {
         Rsp32 a1, a2, a3;
@@ -3117,12 +3949,22 @@ int rsp_tri_write(int32_t *ew,
         }
         else
         {
-        /* dAdX = dA_x * inv_dx */
-        dAdX[k] = mac32_wide(dA_x[k], inv_dx_64, 0);
-
-        /* dAdY = dA_y * inv_dx ; then the accumulator CONTINUES:
-         * dAdE = dAdY + dAdX * dxhdy */
-        dAdY[k] = mac32_wide(dA_y[k], inv_dx_64, &acc);
+        /* dAdX = dA_x * inv_dx ; dAdY = dA_y * inv_dx, then the
+         * accumulator CONTINUES: dAdE = dAdY + dAdX * dxhdy. The
+         * reciprocal-normalizer builds latch the low fraction before the
+         * final VMADH, with its saturation (2.05 IMEM 0xb30..0xb60); a
+         * wide product clamped once at the end differs on small
+         * triangles and saturating gradients. */
+        if (s_texrecip)
+        {
+            dAdX[k] = mac32(dA_x[k], inv_dx, 0);
+            dAdY[k] = mac32(dA_y[k], inv_dx, &acc);
+        }
+        else
+        {
+            dAdX[k] = mac32_wide(dA_x[k], inv_dx_64, 0);
+            dAdY[k] = mac32_wide(dA_y[k], inv_dx_64, &acc);
+        }
         acc += p_udl(dAdX[k].f, dxhdy.f);
         acc += p_udm(dAdX[k].i, dxhdy.f);
         acc += p_udn(dAdX[k].f, dxhdy.i);

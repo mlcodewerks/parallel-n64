@@ -3,8 +3,11 @@
  *  - a DMA raises the PI interrupt when it completes;
  *  - a CPU write to the bus (IO busy only) completes without one;
  *  - PI_STATUS reset abandons the transfer in flight, so its completion
- *    event is withdrawn;
- *  - the domain timing registers keep only their implemented bits.
+ *    event is withdrawn; it clears the busy and error bits only, leaving
+ *    a pending interrupt and an unrelated bus write's event alone;
+ *  - the domain timing registers keep only their implemented bits;
+ *  - with bus timing on, a DMA takes the duration its domain's latency,
+ *    pulse width, release and page size registers give.
  *
  * Built by `make check-core` (top-level Makefile). Exit status 0 on pass.
  */
@@ -47,6 +50,10 @@ void remove_event(struct interrupt_queue* q, int type)
         s_pi_removed++;
 }
 void cp0_update_count(struct r4300_core* r4300) { (void)r4300; }
+void invalidate_r4300_cached_code(struct r4300_core* r4300, uint32_t address, size_t size)
+{
+    (void)r4300; (void)address; (void)size;
+}
 void gen_interrupt(struct r4300_core* r4300) { (void)r4300; }
 int* r4300_cp0_cycle_count(struct cp0* cp0) { (void)cp0; return &s_cycle_count; }
 void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_cause)
@@ -123,12 +130,49 @@ int main(void)
     CHECK(s_pi.regs[PI_STATUS_REG] == 0 && s_pi_removed == 1,
           "PI reset abandons the DMA in flight");
 
+    /* reset leaves the interrupt pending */
+    reset();
+    s_pi.regs[PI_STATUS_REG] = PI_STATUS_DMA_BUSY | PI_STATUS_ERROR | PI_STATUS_INTERRUPT;
+    write_pi(PI_STATUS_REG, PI_STATUS_RESET);
+    CHECK(s_pi.regs[PI_STATUS_REG] == PI_STATUS_INTERRUPT && s_pi_removed == 1,
+          "PI reset clears busy and error, not the interrupt");
+
+    /* with no DMA in flight there is no completion to withdraw */
+    reset();
+    s_pi.regs[PI_STATUS_REG] = PI_STATUS_IO_BUSY;
+    write_pi(PI_STATUS_REG, PI_STATUS_RESET);
+    CHECK(s_pi.regs[PI_STATUS_REG] == PI_STATUS_IO_BUSY && s_pi_removed == 0,
+          "PI reset leaves a bus write's completion alone");
+
     /* clearing the interrupt alone leaves a transfer running */
     reset();
     s_pi.regs[PI_STATUS_REG] = PI_STATUS_DMA_BUSY | PI_STATUS_INTERRUPT;
     write_pi(PI_STATUS_REG, PI_STATUS_CLR_INTR);
     CHECK(s_pi.regs[PI_STATUS_REG] == PI_STATUS_DMA_BUSY && s_pi_removed == 0,
           "clearing the PI interrupt keeps the transfer");
+
+    /* bus-register DMA duration: 4 KiB from an aligned cart address with the
+     * retail cartridge timings (latency 0x40, pulse 0x12, page 2^9, release
+     * 3) crosses 8 pages and flushes 26 buffers:
+     * (15 + 64) * 8 + (18 + 3 + 2) * 2048 + 26 * 28 = 48464 RCP clocks */
+    {
+        uint32_t regs[PI_REGS_COUNT];
+        memset(regs, 0, sizeof(regs));
+        regs[PI_BSD_DOM1_LAT_REG] = 0x40;
+        regs[PI_BSD_DOM1_PWD_REG] = 0x12;
+        regs[PI_BSD_DOM1_PGS_REG] = 0x07;
+        regs[PI_BSD_DOM1_RLS_REG] = 0x03;
+        CHECK(pi_dma_duration(regs, 0x10000000u, 0x1000u) == (48464u * 3u + 3u) / 4u,
+              "bus timing: a 4 KiB cartridge DMA from the domain registers");
+        CHECK(pi_dma_duration(regs, 0x10000000u, 0x80u) == (((15u + 64u) + 23u * 64u + 28u) * 3u + 3u) / 4u,
+              "bus timing: one whole 128-byte buffer");
+        regs[PI_BSD_DOM2_LAT_REG] = 0x05;
+        regs[PI_BSD_DOM2_PWD_REG] = 0x0c;
+        regs[PI_BSD_DOM2_PGS_REG] = 0x0d;
+        regs[PI_BSD_DOM2_RLS_REG] = 0x02;
+        CHECK(pi_dma_duration(regs, 0x08000000u, 0x10u) == (((15u + 5u) + 16u * 8u + 16u) * 3u + 3u) / 4u,
+              "bus timing: SRAM in domain 2 uses the domain 2 registers");
+    }
 
     /* domain registers */
     reset();

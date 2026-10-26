@@ -1202,7 +1202,7 @@ clean: clean-tools
 	rm -f $(OBJECTS) $(TARGET) $(OBJECTS:.o=.d) .build-flags
 
 clean-tools:
-	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) \
+	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) dd_ipl_hle_test$(EXE_EXT) \
 		$(CORE_CHECKS) tools/test_prsp_dmem_wrap.o
 
 # Angrylion benchmark and bit-exactness harnesses (tools/angrylion_*.c),
@@ -1211,7 +1211,9 @@ clean-tools:
 ANGRYLION_TOOL_OBJS := $(VIDEODIR_ANGRYLION)/n64video.o \
 	$(VIDEODIR_ANGRYLION)/parallel_al.o \
 	$(LIBRETRO_COMM_DIR)/rthreads/rthreads.o \
-	$(LIBRETRO_COMM_DIR)/features/features_cpu.o
+	$(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.o \
+	$(LIBRETRO_COMM_DIR)/features/features_cpu.o \
+	$(LIBRETRO_COMM_DIR)/time/rtime.o
 ANGRYLION_TOOLS := angrylion_bench$(EXE_EXT) angrylion_verify$(EXE_EXT) \
 	angrylion_pool_overhead$(EXE_EXT)
 
@@ -1246,6 +1248,7 @@ angrylion_gen_test$(EXE_EXT): tools/angrylion_gen_test.c
 ANGRYLION_EMIT_OBJS := $(VIDEODIR_ANGRYLION)/rdp_emit_frontend.o \
 	$(VIDEODIR_ANGRYLION)/rdp_emit_bridge.o \
 	$(VIDEODIR_ANGRYLION)/rdp_emit_rsp.o \
+	$(VIDEODIR_ANGRYLION)/rdp_emit_f3dtri.o \
 	$(VIDEODIR_ANGRYLION)/rdp_emit.o
 angrylion_clip_test$(EXE_EXT): tools/angrylion_clip_test.c $(ANGRYLION_EMIT_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_EMIT_OBJS) -o $@ -lm
@@ -1262,6 +1265,30 @@ ANGRYLION_WALKER_OBJS := $(filter-out $(VIDEODIR_ANGRYLION)/rdp_emit_hle.o, \
 angrylion_f3d_near_test$(EXE_EXT): tools/angrylion_f3d_near_test.c $(ANGRYLION_WALKER_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
 
+angrylion_f3d_gbi1_test$(EXE_EXT): tools/angrylion_f3d_gbi1_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+angrylion_texrecip_test$(EXE_EXT): tools/angrylion_texrecip_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+angrylion_cbfd_light_test$(EXE_EXT): tools/angrylion_cbfd_light_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+angrylion_rare_clip_test$(EXE_EXT): tools/angrylion_rare_clip_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+angrylion_far_reject_test$(EXE_EXT): tools/angrylion_far_reject_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+# Legacy (GoldenEye / Perfect Dark) lighting: detection and rounding.
+angrylion_legacy_light_test$(EXE_EXT): tools/angrylion_legacy_light_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+# S2DEX 1.x object commands: tile history, sprite triangles, RECTANGLE_R,
+# SELECT_DL.
+angrylion_s2dex1_test$(EXE_EXT): tools/angrylion_s2dex1_test.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
 # Emitter divide unit against the cxd4 interpreter's VRCP/VRSQ pairs.
 angrylion_divide_test$(EXE_EXT): tools/angrylion_divide_test.c $(CXD4DIR)/rsp.o $(ANGRYLION_EMIT_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(CXD4DIR)/rsp.o $(ANGRYLION_EMIT_OBJS) -o $@ -lm
@@ -1270,9 +1297,33 @@ angrylion_divide_test$(EXE_EXT): tools/angrylion_divide_test.c $(CXD4DIR)/rsp.o 
 angrylion_rs_fullsync_test$(EXE_EXT): tools/angrylion_rs_fullsync_test.c $(ANGRYLION_WALKER_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
 
+# Fast3D triangle setup, clipper and vertex write (GoldenEye, Perfect Dark,
+# Mario Kart 64) against LLE-captured vertex records and RDP words.
+angrylion_f3dtri_test$(EXE_EXT): tools/angrylion_f3dtri_test.c tools/angrylion_f3dtri_expected.h $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -Itools -w $< $(ANGRYLION_WALKER_OBJS) -o $@ -lm
+
+# The same vectors through the portable vector-unit lane loops.
+angrylion_f3dtri_c_test$(EXE_EXT): tools/angrylion_f3dtri_test.c tools/angrylion_f3dtri_expected.h $(VIDEODIR_ANGRYLION)/rdp_emit_f3dtri.c $(ANGRYLION_WALKER_OBJS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DF3D_NO_SSE2 -I$(VIDEODIR_ANGRYLION) -Itools -w $< $(VIDEODIR_ANGRYLION)/rdp_emit_f3dtri.c $(filter-out $(VIDEODIR_ANGRYLION)/rdp_emit_f3dtri.o,$(ANGRYLION_WALKER_OBJS)) -o $@ -lm
+
+# The F3DEX2-family triangle writer on a fixed pseudo-random stream, with
+# the SSE2 attribute lanes and with the scalar loop.
+angrylion_tri_write_test$(EXE_EXT): tools/angrylion_tri_write_test.c $(VIDEODIR_ANGRYLION)/rdp_emit_rsp.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(VIDEODIR_ANGRYLION)/rdp_emit_rsp.c -o $@ -lm
+
+angrylion_tri_write_c_test$(EXE_EXT): tools/angrylion_tri_write_test.c $(VIDEODIR_ANGRYLION)/rdp_emit_rsp.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRSP_NO_SSE2 -I$(VIDEODIR_ANGRYLION) -w $< $(VIDEODIR_ANGRYLION)/rdp_emit_rsp.c -o $@ -lm
+
 ANGRYLION_CHECKS := angrylion_vemit_test$(EXE_EXT) angrylion_gen_test$(EXE_EXT) \
 	angrylion_clip_test$(EXE_EXT) angrylion_f3d_near_test$(EXE_EXT) \
-	angrylion_divide_test$(EXE_EXT) angrylion_rs_fullsync_test$(EXE_EXT)
+	angrylion_divide_test$(EXE_EXT) angrylion_rs_fullsync_test$(EXE_EXT) \
+	angrylion_far_reject_test$(EXE_EXT) angrylion_f3d_gbi1_test$(EXE_EXT) \
+	angrylion_hazard_wrap_test$(EXE_EXT) angrylion_texrecip_test$(EXE_EXT) \
+	angrylion_cbfd_light_test$(EXE_EXT) angrylion_rare_clip_test$(EXE_EXT) \
+	angrylion_dpc_regs_test$(EXE_EXT) angrylion_noise_frame_test$(EXE_EXT) \
+	angrylion_legacy_light_test$(EXE_EXT) angrylion_s2dex1_test$(EXE_EXT) \
+	angrylion_f3dtri_test$(EXE_EXT) angrylion_f3dtri_c_test$(EXE_EXT) \
+	angrylion_tri_write_test$(EXE_EXT) angrylion_tri_write_c_test$(EXE_EXT)
 
 tools: $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS)
 
@@ -1280,6 +1331,24 @@ tools: $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLIO
 # stage, and the HLE geometry frontend's regression lanes.
 check-angrylion: $(ANGRYLION_CHECKS)
 	@set -e; for t in $(ANGRYLION_CHECKS); do echo "== $$t"; ./$$t; done
+
+# Built-in 64DD IPL: boot test disks through the core with no IPL ROM and
+# check the state their boot code finds against the retail IPL's (for a
+# 43-block and an 8-block boot). Needs the core built first.
+dd_ipl_hle_test$(EXE_EXT): tools/dd_ipl_hle_test.c tools/dd_ipl_hle_expected.h
+	$(CC) $(CHECK_CFLAGS) -Itools $< -o $@
+
+DD_IPL_CHECK_DIR := dd_ipl_check.tmp
+check-dd-ipl: $(TARGET) lrhost$(EXE_EXT) dd_ipl_hle_test$(EXE_EXT)
+	@set -e; rm -rf $(DD_IPL_CHECK_DIR); mkdir -p $(DD_IPL_CHECK_DIR)/lrhost-system; \
+	for n in 43 8; do \
+		echo "== $$n-block boot"; \
+		./dd_ipl_hle_test$(EXE_EXT) disk $(DD_IPL_CHECK_DIR)/disk_$$n.ndd $$n; \
+		( cd $(DD_IPL_CHECK_DIR) && LRHOST_RAMDUMP=ram_$$n.bin ../lrhost$(EXE_EXT) ../$(TARGET) disk_$$n.ndd 4 \
+			parallel-n64-gfxplugin=angrylion parallel-n64-rspplugin=hle \
+			parallel-n64-cpucore=pure_interpreter > /dev/null ); \
+		./dd_ipl_hle_test$(EXE_EXT) check $(DD_IPL_CHECK_DIR)/ram_$$n.bin $$n; \
+	done; rm -rf $(DD_IPL_CHECK_DIR)
 
 # Core self-tests: MMIO register and DMA bounds, the frontend memory map,
 # framebuffer write notifications, COP0 exceptions, PI status, the MusyX
@@ -1304,6 +1373,7 @@ TEST_RCP_BOUNDS_SRCS := $(CORE_DEVICE_DIR)/rcp/ai/ai_controller.c \
 	$(CORE_DEVICE_DIR)/rcp/si/si_controller.c \
 	$(CORE_DEVICE_DIR)/rcp/vi/vi_controller.c \
 	$(CORE_DEVICE_DIR)/cart/sram.c \
+	$(CORE_DEVICE_DIR)/cart/is_viewer.c \
 	$(CORE_DEVICE_DIR)/dd/dd_controller.c \
 	$(CORE_DIR)/src/api/callbacks.c
 test_rcp_bounds$(EXE_EXT): tools/test_rcp_bounds.c $(TEST_RCP_BOUNDS_SRCS)
@@ -1333,6 +1403,14 @@ test_fpu_compare$(EXE_EXT): tools/test_fpu_compare.c
 	$(CC) $(CHECK_CFLAGS) -Ofast $(CHECK_SANITIZE) -I$(CORE_DIR)/src \
 		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
 
+TEST_R4300_INTERP_SRCS := $(CORE_DEVICE_DIR)/r4300/cp0.c $(CORE_DEVICE_DIR)/r4300/interrupt.c \
+	$(CORE_DEVICE_DIR)/r4300/cp1.c
+test_r4300_interp$(EXE_EXT): tools/test_r4300_interp.c $(CORE_DEVICE_DIR)/r4300/pure_interp.c \
+		$(CORE_DEVICE_DIR)/r4300/mips_instructions.def $(TEST_R4300_INTERP_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(CORE_DIR)/subprojects/xxhash -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$< $(TEST_R4300_INTERP_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
 TEST_PI_SRCS := $(CORE_DEVICE_DIR)/rcp/pi/pi_controller.c $(CORE_DEVICE_DIR)/rcp/mi/mi_controller.c
 test_pi_status$(EXE_EXT): tools/test_pi_status.c $(TEST_PI_SRCS)
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
@@ -1345,15 +1423,54 @@ test_musyx_bounds$(EXE_EXT): tools/test_musyx_bounds.c $(RSPDIR)/src/musyx.c $(T
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
 		$< $(TEST_MUSYX_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
 
+test_musyx_aux$(EXE_EXT): tools/test_musyx_aux.c $(RSPDIR)/src/musyx.c $(TEST_MUSYX_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(TEST_MUSYX_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+test_hle_dispatch$(EXE_EXT): tools/test_hle_dispatch.c $(RSPDIR)/src/hle.c $(RSPDIR)/src/hle_memory.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(RSPDIR)/src/hle_memory.c -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+test_pif_write$(EXE_EXT): tools/test_pif_write.c $(CORE_DEVICE_DIR)/pif/pif.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_re2_fill$(EXE_EXT): tools/test_re2_fill.c $(RSPDIR)/src/re2.c $(RSPDIR)/src/hle_memory.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(RSPDIR)/src/hle_memory.c -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_hle_dram_wrap$(EXE_EXT): tools/test_hle_dram_wrap.c $(RSPDIR)/src/hle_memory.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_alist_ops$(EXE_EXT): tools/test_alist_ops.c $(RSPDIR)/src/alist.c $(RSPDIR)/src/alist_nead.c $(TEST_MUSYX_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(TEST_MUSYX_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
+test_alist_abi1$(EXE_EXT): tools/test_alist_abi1.c $(RSPDIR)/src/alist.c $(RSPDIR)/src/alist_audio.c $(TEST_MUSYX_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(RSPDIR)/src -I$(LIBRETRO_COMM_DIR)/include \
+		$< $(TEST_MUSYX_SRCS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
+
 ZBOSS_TEST_OBJS := $(filter-out $(VIDEODIR_ANGRYLION)/rdp_emit_zboss.o,$(ANGRYLION_WALKER_OBJS))
 angrylion_zboss_audio_test$(EXE_EXT): tools/angrylion_zboss_audio_test.c \
 		$(VIDEODIR_ANGRYLION)/rdp_emit_zboss.c $(ZBOSS_TEST_OBJS)
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_ANGRYLION) -I$(LIBRETRO_COMM_DIR)/include \
 		$< $(ZBOSS_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
 
+# The controller backend is #included by the test, which defines the
+# frontend globals it reads.
+test_mouse_accum$(EXE_EXT): tools/test_mouse_accum.c \
+		$(CORE_DIR)/src/plugin/emulate_game_controller_via_libretro.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
 CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write$(EXE_EXT) \
-	test_cp0_exceptions$(EXE_EXT) test_fpu_compare$(EXE_EXT) test_pi_status$(EXE_EXT) \
-	test_musyx_bounds$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT)
+	test_cp0_exceptions$(EXE_EXT) test_r4300_interp$(EXE_EXT) test_fpu_compare$(EXE_EXT) test_pi_status$(EXE_EXT) \
+	test_musyx_bounds$(EXE_EXT) test_musyx_aux$(EXE_EXT) test_alist_ops$(EXE_EXT) test_alist_abi1$(EXE_EXT) test_hle_dispatch$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT) \
+	test_mouse_accum$(EXE_EXT) test_hle_dram_wrap$(EXE_EXT) test_pif_write$(EXE_EXT) \
+	test_re2_fill$(EXE_EXT)
 
 ifeq ($(HAVE_PARALLEL_RSP), 1)
 PRSP_TEST_OBJS := $(filter $(RSPDIR_PARALLEL)/%,$(OBJECTS))

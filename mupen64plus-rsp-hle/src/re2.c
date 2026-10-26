@@ -245,19 +245,28 @@ void decode_video_frame_task(struct hle_t* hle)
 
 void fill_video_double_buffer_task(struct hle_t* hle)
 {
-    int data_ptr = *dmem_u32(hle, TASK_UCODE_DATA);
+    int data_ptr, pSrc, pDest, width, height, stride;
+    int i, j;
+    int r, g, b, a;
+    uint32_t pixel, pixel1, pixel2;
 
-    int pSrc = *dram_u32(hle, data_ptr);
-    int pDest = *dram_u32(hle, data_ptr + 0x4);
-    int width = *dram_u32(hle, data_ptr + 0x8) >> 1;
-    int height = *dram_u32(hle, data_ptr + 0x10) << 1;
-    int stride = *dram_u32(hle, data_ptr + 0x1c) >> 1;
+    /* The microcode's boot entry checks SIG0 first: a fill that the CPU
+     * pre-empted is completed there without touching any pixels. */
+    if (*hle->sp_status & SP_STATUS_SIG0) {
+        *hle->sp_status &= ~SP_STATUS_SIG0;
+        rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
+        return;
+    }
+
+    data_ptr = *dmem_u32(hle, TASK_UCODE_DATA);
+
+    pSrc = *dram_u32(hle, data_ptr);
+    pDest = *dram_u32(hle, data_ptr + 0x4);
+    width = *dram_u32(hle, data_ptr + 0x8) >> 1;
+    height = *dram_u32(hle, data_ptr + 0x10) << 1;
+    stride = *dram_u32(hle, data_ptr + 0x1c) >> 1;
 
     assert((*dram_u32(hle, data_ptr + 0x28) >> 16) == 0x8000);
-
-    int i, j;
-    int r, g, b;
-    uint32_t pixel, pixel1, pixel2;
 
     for(i = 0; i < height; i++)
     {
@@ -269,8 +278,11 @@ void fill_video_double_buffer_task(struct hle_t* hle)
         r = (((pixel1 >> 24) & 0xff) + ((pixel2 >> 24) & 0xff)) >> 1;
         g = (((pixel1 >> 16) & 0xff) + ((pixel2 >> 16) & 0xff)) >> 1;
         b = (((pixel1 >> 8) & 0xff) + ((pixel2 >> 8) & 0xff)) >> 1;
-      
-        pixel = (r << 24) | (g << 16) | (b << 8) | 0;
+        /* the microcode loads and averages all eight bytes of each pixel
+         * pair (LUV/SUV), so alpha is blended like the colour channels */
+        a = ((pixel1 & 0xff) + (pixel2 & 0xff)) >> 1;
+
+        pixel = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | (uint32_t)a;
       
         dram_store_u32(hle, &pixel, pDest+j, 1);
       }
@@ -278,5 +290,8 @@ void fill_video_double_buffer_task(struct hle_t* hle)
       pDest += stride;
     }
 
-    rsp_break(hle, SP_STATUS_TASKDONE);
+    /* It finishes with an SP_STATUS write of 0x5200: clear SIG0, set
+     * SIG1 and SIG2 (task done).  The game's frame loop waits on SIG1. */
+    *hle->sp_status &= ~SP_STATUS_SIG0;
+    rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
 }
