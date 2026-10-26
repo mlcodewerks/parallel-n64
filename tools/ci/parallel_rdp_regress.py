@@ -18,8 +18,19 @@ shader variants for devices without 8-bit SSBO storage, and all must
 produce the same frames; with v2 the core must create its device through
 the frontend's wrapper. Each ROM is also rendered at 2x, with and without
 8-bit storage, which must agree and match "<rom>@2x".
+
+The ROMs in UPSCALER_ROMS also run for a frontend temporal upscaler
+(lrhost_vk's LRHOST_UPSCALER): the frames, their motion vectors and depth
+must match "<rom>@upscaler" threaded and single-threaded alike and
+whatever the options it overrides say, and pass tools/ci/upscaler_check.py,
+which checks the jitter and, for the ROMs that move, that the motion
+vectors take every changed pixel back to where the frame before had it.
+The RDP's coverage antialiasing is off for it, except where a draw cuts
+out its texels through the coverage (alphacov).
 """
 import argparse, concurrent.futures, hashlib, json, os, subprocess, sys, urllib.request
+
+import upscaler_check
 
 KROM = "https://raw.githubusercontent.com/PeterLemon/N64/7085543e4a19d8c539fc9e0a4d2869e788b4ed4b/"
 ROMS = {
@@ -55,6 +66,21 @@ MODES = {"threaded": {}, "single-threaded": {"PARALLEL_RDP_SINGLE_THREADED_COMMA
 # match the "<rom>@2x" expectations.
 UPSCALED_OPTIONS = ["parallel-n64-upscaling=2x"]
 UPSCALED_MODES = {"2x": {}, "2x-no-8bit-storage": {"PARALLEL_RDP_NO_STORAGE_8BIT": "1"}}
+# For a temporal upscaler asking for 640x480: a 320x240 framebuffer at 2x.
+# Consecutive frames, for the motion vector check; True for the ROMs
+# that move every frame.
+UPSCALER_ROMS = {"rottri32": True, "cube16": True, "zbuf16": False, "alphacov": False}
+UPSCALER_FRAMES = (30, 36)
+# The options the upscaler overrides change nothing: super-sampled
+# read-back (SSAA), downsampling, the VI filters and the factor.
+UPSCALER_MODES = {"upscaler": ({}, ()),
+                  "upscaler-single-threaded": ({"PARALLEL_RDP_SINGLE_THREADED_COMMAND": "1"}, ()),
+                  "upscaler-overridden": ({}, ("parallel-n64-upscaling=4x",
+                                               "parallel-n64-parallel-rdp-super-sampled-read-back=enabled",
+                                               "parallel-n64-parallel-rdp-downscaling=1/2",
+                                               "parallel-n64-parallel-rdp-vi-aa=enabled",
+                                               "parallel-n64-parallel-rdp-divot-filter=enabled",
+                                               "parallel-n64-parallel-rdp-dither-filter=enabled"))}
 
 
 def fetch(romdir, name):
@@ -100,6 +126,97 @@ def run(args, name, rom, mode, env_extra, options=()):
     return hashes, None
 
 
+def coverage_aa_off(out, n):
+    """alphacov draws its cases twice, the lower half with antialiasing on
+    (226 lines below the upper), in columns 38 pixels wide from x = 10 and
+    x = 320. For the upscaler, which antialiases from the jittered frames
+    itself, the columns without CVG_TIMES_ALPHA (0, 2, 4, 6) must come
+    out the same in both halves; those with it (1, 3, 5, 7), which cut
+    out their texels through the coverage, keep it, so the lower half
+    cuts out the texels the upper one draws."""
+    with open(os.path.join(out, "%04d.raw.size" % n)) as f:
+        w, h = map(int, f.read().split())
+    with open(os.path.join(out, "%04d.raw" % n), "rb") as f:
+        px = f.read()
+    scale = w // 640
+
+    def column(left, k, top):
+        x0, x1 = (left + 38 * k) * scale * 4, (left + 38 * k + 38) * scale * 4
+        return b"".join(px[y * w * 4 + x0:y * w * 4 + x1] for y in range(top * scale, (top + 220) * scale))
+
+    errors = []
+    for left in (10, 320):
+        for k in range(8):
+            same = column(left, k, 0) == column(left, k, 226)
+            if same != (k % 2 == 0):
+                errors.append("x=%d column %d %s" % (left, k, "cut-outs drawn opaque" if same else "edges antialiased"))
+    return errors
+
+
+def run_upscaler(args, name, rom, mode, env_extra, options, moving):
+    out = os.path.join(args.out, name, mode)
+    os.makedirs(out, exist_ok=True)
+    for f in os.listdir(out):
+        os.remove(os.path.join(out, f))
+    log_path = os.path.join(out, "upscaler.txt")
+    first, last = UPSCALER_FRAMES
+    env = dict(os.environ, LRHOST_DUMPDIR=out, LRHOST_DUMP_FROM=str(first), LRHOST_DUMP_TO=str(last),
+               LRHOST_DUMP_EVERY="1", LRHOST_UPSCALER="640,480", LRHOST_UPSCALER_LOG=log_path,
+               LRHOST_VERBOSE="1", **env_extra)
+    p = subprocess.run([args.host, args.core, rom, str(last + 1)] + OPTIONS + list(options), env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+    log = p.stdout.decode("utf-8", "replace")
+    with open(os.path.join(out, "log.txt"), "w") as f:
+        f.write(log)
+    if p.returncode != 0:
+        return None, "exit %d" % p.returncode
+    if "asked for in retro_load_game 1," not in log:
+        return None, "the core did not ask for the upscaler in retro_load_game"
+    if "Temporal upscaler: drawing at 2x" not in log:
+        return None, "the core did not say it draws for the upscaler"
+    check = subprocess.run([sys.executable, upscaler_check.__file__, out, log_path, str(first), str(last)]
+                           + (["--moving"] if moving else []), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with open(os.path.join(out, "check.txt"), "wb") as f:
+        f.write(check.stdout)
+    if check.returncode != 0:
+        return None, "upscaler_check.py: " + check.stdout.decode("utf-8", "replace").strip().splitlines()[-1]
+    if name == "alphacov":
+        errors = coverage_aa_off(out, first)
+        if errors:
+            return None, "coverage antialiasing: " + ", ".join(errors)
+    hashes = {}
+    for n in range(first, last + 1):
+        h = hashlib.sha256()
+        for part in ("raw", "mv.raw", "depth.raw"):
+            path = os.path.join(out, "%04d.%s" % (n, part))
+            if not os.path.exists(path):
+                return None, "frame %d has no %s" % (n, part)
+            with open(path, "rb") as f:
+                h.update(f.read())
+        with open(os.path.join(out, "%04d.raw.size" % n)) as f:
+            size = f.read().split()
+        hashes[str(n)] = "%sx%s:%s" % (size[0], size[1], h.hexdigest()[:32])
+    return hashes, None
+
+
+def run_unfit(args, name, rom):
+    """A request no factor of the framebuffer fits: the core says so
+    and renders as usual, handing over nothing."""
+    env = dict(os.environ, LRHOST_UPSCALER="1000,700,900,650,1100,750", LRHOST_VERBOSE="1")
+    p = subprocess.run([args.host, args.core, rom, "5"] + OPTIONS, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+    log = p.stdout.decode("utf-8", "replace")
+    out = os.path.join(args.out, name, "upscaler-unfit")
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "log.txt"), "w") as f:
+        f.write(log)
+    if p.returncode != 0:
+        return "exit %d" % p.returncode
+    if "no factor of 320x240 fits" not in log or "frames with inputs 0" not in log:
+        return "a request no factor fits was not said, or got inputs"
+    return None
+
+
 def compare(name, group, ref, key, args, expected, results, failures):
     """Every mode of a group must render what ref does, and ref must match
     the expectations under key."""
@@ -127,6 +244,19 @@ def check_rom(args, name, expected):
                 continue
             group[mode] = hashes
         compare(name, group, ref, key, args, expected, results, failures)
+    if name in UPSCALER_ROMS:
+        group = {}
+        for mode, (env_extra, options) in UPSCALER_MODES.items():
+            hashes, err = run_upscaler(args, name, rom, mode, env_extra, options, UPSCALER_ROMS[name])
+            if err:
+                failures.append("%s (%s): %s" % (name, mode, err))
+                continue
+            group[mode] = hashes
+        compare(name, group, "upscaler", name + "@upscaler", args, expected, results, failures)
+        if UPSCALER_ROMS[name]:
+            err = run_unfit(args, name, rom)
+            if err:
+                failures.append("%s (upscaler-unfit): %s" % (name, err))
     return results, failures
 
 
