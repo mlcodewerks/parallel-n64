@@ -54,10 +54,7 @@ enum CommandProcessorFlagBits
 	COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT = 1 << 3,
 	COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT = 1 << 4,
 	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT = 1 << 5,
-	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT = 1 << 6,
-	// Frames go to a temporal upscaler (ScanoutOptions::upscaler) from the
-	// start: coverage antialiasing is off from the first primitive.
-	COMMAND_PROCESSOR_FLAG_TEMPORAL_UPSCALER_BIT = 1 << 7
+	COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT = 1 << 6
 };
 using CommandProcessorFlags = uint32_t;
 
@@ -145,6 +142,11 @@ public:
 	// For Vulkan work that has to happen where the renderer drives the
 	// device. Must not be called from inside the command thread.
 	void run_on_command_thread(void (*fn)(void *), void *ctx);
+
+	// Builds the pipelines @records lists on the pipeline worker, ahead of
+	// their first use, and returns once those a draw cannot do without are
+	// built. The thread that queues commands, before the first one.
+	void build_pipelines_ahead(const pipeline_record_t *records, size_t count);
 
 	// Queues up state and drawing commands.
 	void enqueue_command(unsigned num_words, const uint32_t *words);
@@ -312,7 +314,6 @@ private:
 	uint32_t load_addr = 0;
 	int32_t prim_z = 0;
 	bool prim_depth = false;
-	bool coverage_aa_off = false;
 	void upscaler_triangle(unsigned op, TriangleSetup &setup, AttributeSetup &attr);
 	void upscaler_scanout();
 

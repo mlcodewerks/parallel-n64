@@ -6,6 +6,11 @@
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
+#include <streams/file_stream.h>
+#include <file/file_path.h>
+#include <encodings/crc32.h>
+#include "pipeline_record_list.h"
 
 using namespace Vulkan;
 using namespace std;
@@ -105,6 +110,54 @@ void set_hle_cmd_buffer(const uint8_t *buf, uint32_t base_byte_addr, uint32_t le
 	hle_cmd_len = len_bytes;
 }
 
+/* Runs the whole commands at the start of @words, @count 64-bit words,
+ * and returns how many words they took: a command cut short at the end
+ * is left for when the rest of it comes. */
+static int run_commands(const uint32_t *words, int count)
+{
+	int cur = 0;
+	while (cur < count)
+	{
+		const uint32_t *w = words + 2 * cur;
+		uint32_t w1 = w[0];
+		uint32_t command = (w1 >> 24) & 63;
+		int cmd_length = cmd_len_lut[command];
+
+		if (count - cur < cmd_length)
+			break;
+
+		if (command >= 8 && frontend)
+			frontend->enqueue_command(cmd_length * 2, w);
+
+		if (command == 0x35 || command == 0x32)
+		{
+			unsigned set = command == 0x35 ? 0 : 1;
+			unsigned tile = (w[1] >> 24) & 7;
+			tile_state_words[set][tile][0] = w[0];
+			tile_state_words[set][tile][1] = w[1];
+			tile_state_valid[set][tile] = true;
+		}
+		else if (command >= 0x2a && command != 0x30 && command != 0x33 && command != 0x34 && command != 0x36)
+		{
+			state_words[command][0] = w[0];
+			state_words[command][1] = w[1];
+			state_valid[command] = true;
+		}
+
+		if (RDP::Op(command) == RDP::Op::SyncFull)
+		{
+			// For synchronous RDP:
+			if (synchronous && frontend)
+				frontend->wait_for_timeline(frontend->signal_timeline());
+			*gfx_info.MI_INTR_REG |= DP_INTERRUPT;
+			gfx_info.CheckInterrupts();
+		}
+
+		cur += cmd_length;
+	}
+	return cur;
+}
+
 void process_commands()
 {
 	if (!device_supported)
@@ -122,7 +175,43 @@ void process_commands()
 		return;
 
 	uint32_t offset = DP_CURRENT;
-	if (*GET_GFX_INFO(DPC_STATUS_REG) & DP_STATUS_XBUS_DMA)
+	const bool xbus = (*GET_GFX_INFO(DPC_STATUS_REG) & DP_STATUS_XBUS_DMA) != 0;
+	if (!xbus && (DP_END > 0x7ffffff || DP_CURRENT > 0x7ffffff))
+		return;
+
+	/* Source the command words from the HLE host buffer when a
+	 * synthesized FIFO is active, else from guest RDRAM. */
+	const bool from_hle = !xbus && hle_cmd_buf != nullptr
+	                      && DP_CURRENT >= hle_cmd_base
+	                      && (DP_CURRENT - hle_cmd_base) < hle_cmd_len;
+
+	/* A list in one piece of memory, with nothing left over from the last
+	 * one, is run where it is; only a command it cuts short is kept. */
+	if (!xbus && cmd_ptr == 0)
+	{
+		const uint8_t *direct = nullptr;
+		if (from_hle)
+		{
+			if ((DP_CURRENT - hle_cmd_base) + uint32_t(length) * 8u <= hle_cmd_len)
+				direct = hle_cmd_buf + (DP_CURRENT - hle_cmd_base);
+		}
+		else if (DP_CURRENT + uint32_t(length) * 8u <= 0x1000000u)
+			direct = DRAM + DP_CURRENT;
+
+		if (direct)
+		{
+			const uint32_t *words = reinterpret_cast<const uint32_t *>(direct);
+			int done = run_commands(words, length);
+			if (done < length)
+				memcpy(cmd_data, words + 2 * done, size_t(length - done) * 8);
+			cmd_ptr = length - done;
+			cmd_cur = 0;
+			*GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
+			return;
+		}
+	}
+
+	if (xbus)
 	{
 		do
 		{
@@ -135,85 +224,34 @@ void process_commands()
 	}
 	else
 	{
-		if (DP_END > 0x7ffffff || DP_CURRENT > 0x7ffffff)
+		do
 		{
-			return;
-		}
-		else
-		{
-			/* Source the command words from the HLE host buffer when a
-			 * synthesized FIFO is active, else from guest RDRAM.  Chosen
-			 * once here, not per word: a base-pointer swap, no hot-path cost. */
-			bool from_hle = (hle_cmd_buf != nullptr
-			                 && DP_CURRENT >= hle_cmd_base
-			                 && (DP_CURRENT - hle_cmd_base) < hle_cmd_len);
-			do
+			const uint8_t *p;
+			if (from_hle)
 			{
-				const uint8_t *p;
-				if (from_hle)
-				{
-					uint32_t rel = offset - hle_cmd_base;
-					if (rel + 8 > hle_cmd_len)
-						break;
-					p = hle_cmd_buf + rel;
-				}
-				else
-				{
-					offset &= 0xFFFFF8;
-					p = DRAM + offset;
-				}
-				cmd_data[2 * cmd_ptr + 0] = *reinterpret_cast<const uint32_t *>(p);
-				cmd_data[2 * cmd_ptr + 1] = *reinterpret_cast<const uint32_t *>(p + 4);
-				offset += sizeof(uint64_t);
-				cmd_ptr++;
-			} while (--length > 0);
-		}
+				uint32_t rel = offset - hle_cmd_base;
+				if (rel + 8 > hle_cmd_len)
+					break;
+				p = hle_cmd_buf + rel;
+			}
+			else
+			{
+				offset &= 0xFFFFF8;
+				p = DRAM + offset;
+			}
+			cmd_data[2 * cmd_ptr + 0] = *reinterpret_cast<const uint32_t *>(p);
+			cmd_data[2 * cmd_ptr + 1] = *reinterpret_cast<const uint32_t *>(p + 4);
+			offset += sizeof(uint64_t);
+			cmd_ptr++;
+		} while (--length > 0);
 	}
 
-	while (cmd_cur - cmd_ptr < 0)
+	cmd_cur += run_commands(&cmd_data[2 * cmd_cur], cmd_ptr - cmd_cur);
+	if (cmd_cur == cmd_ptr)
 	{
-		uint32_t w1 = cmd_data[2 * cmd_cur];
-		uint32_t command = (w1 >> 24) & 63;
-		int cmd_length = cmd_len_lut[command];
-
-		if (cmd_ptr - cmd_cur - cmd_length < 0)
-		{
-			*GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
-			return;
-		}
-
-		if (command >= 8 && frontend)
-			frontend->enqueue_command(cmd_length * 2, &cmd_data[2 * cmd_cur]);
-
-		if (command == 0x35 || command == 0x32)
-		{
-			unsigned set = command == 0x35 ? 0 : 1;
-			unsigned tile = (cmd_data[2 * cmd_cur + 1] >> 24) & 7;
-			tile_state_words[set][tile][0] = cmd_data[2 * cmd_cur];
-			tile_state_words[set][tile][1] = cmd_data[2 * cmd_cur + 1];
-			tile_state_valid[set][tile] = true;
-		}
-		else if (command >= 0x2a && command != 0x30 && command != 0x33 && command != 0x34 && command != 0x36)
-		{
-			state_words[command][0] = cmd_data[2 * cmd_cur];
-			state_words[command][1] = cmd_data[2 * cmd_cur + 1];
-			state_valid[command] = true;
-		}
-
-		if (RDP::Op(command) == RDP::Op::SyncFull)
-		{
-			// For synchronous RDP:
-			if (synchronous && frontend)
-				frontend->wait_for_timeline(frontend->signal_timeline());
-			*gfx_info.MI_INTR_REG |= DP_INTERRUPT;
-			gfx_info.CheckInterrupts();
-		}
-
-		cmd_cur += cmd_length;
+		cmd_ptr = 0;
+		cmd_cur = 0;
 	}
-
-	cmd_ptr = 0;
-	cmd_cur = 0;
 	*GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
 }
 
@@ -264,6 +302,90 @@ void begin_frame()
 	//pending_timeline_value = timeline_value;
 }
 
+/* The driver's pipeline cache and the list of the pipelines built, kept
+ * in the system folder from one session to the next: the list outlives a
+ * cache another driver no longer takes. What was loaded is kept to merge
+ * into, and to leave the files alone when nothing changed. */
+static pipeline_record_t *pipeline_list;
+static size_t pipeline_list_count;
+static uint32_t pipeline_cache_loaded_crc;
+static int64_t pipeline_cache_loaded_size;
+
+static bool pipeline_file_path(char *s, size_t len, const char *name)
+{
+	const char *dir = NULL;
+	if (!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) || !dir || !*dir)
+		return false;
+	fill_pathname_join_special(s, dir, name, len);
+	return true;
+}
+
+static void pipeline_files_load(void)
+{
+	char path[PATH_MAX_LENGTH];
+	void *blob = NULL;
+	int64_t size = 0;
+
+	pipeline_cache_loaded_crc  = 0;
+	pipeline_cache_loaded_size = -1;
+	if (pipeline_file_path(path, sizeof(path), "parallel_rdp_pipeline_cache.bin")
+	    && filestream_read_file(path, &blob, &size) && blob)
+	{
+		pipeline_cache_loaded_crc  = encoding_crc32(0, (const uint8_t *)blob, (size_t)size);
+		pipeline_cache_loaded_size = size;
+	}
+	/* (one the device does not take is replaced by an empty one) */
+	device->init_pipeline_cache((const uint8_t *)blob, blob ? (size_t)size : 0);
+	free(blob);
+
+	free(pipeline_list);
+	pipeline_list       = NULL;
+	pipeline_list_count = 0;
+	if (pipeline_file_path(path, sizeof(path), "parallel_rdp_pipelines.bin"))
+		pipeline_list = pipeline_record_list_load(path, &pipeline_list_count);
+}
+
+/* Once no thread builds pipelines any more and the device is still there. */
+static void pipeline_files_save(void)
+{
+	char path[PATH_MAX_LENGTH];
+	const pipeline_record_t *built = NULL;
+	pipeline_record_t *merged;
+	size_t num_built = device->get_pipeline_records(&built);
+	size_t count, size;
+	uint8_t *blob;
+
+	/* this session's first, so what is past the cap is the oldest */
+	merged = (pipeline_record_t *)malloc((num_built + pipeline_list_count + 1) * sizeof(*merged));
+	if (merged)
+	{
+		if (num_built)
+			memcpy(merged, built, num_built * sizeof(*merged));
+		if (pipeline_list_count)
+			memcpy(merged + num_built, pipeline_list, pipeline_list_count * sizeof(*merged));
+		count = pipeline_record_list_unique(merged, num_built + pipeline_list_count,
+		                                    PIPELINE_RECORD_LIST_MAX);
+		if ((count != pipeline_list_count
+		     || (count && memcmp(merged, pipeline_list, count * sizeof(*merged))))
+		    && pipeline_file_path(path, sizeof(path), "parallel_rdp_pipelines.bin"))
+			pipeline_record_list_save(path, merged, count);
+		free(merged);
+	}
+	free(pipeline_list);
+	pipeline_list       = NULL;
+	pipeline_list_count = 0;
+
+	size = device->get_pipeline_cache_size();
+	if (!size || !(blob = (uint8_t *)malloc(size)))
+		return;
+	if (device->get_pipeline_cache_data(blob, size)
+	    && ((int64_t)size != pipeline_cache_loaded_size
+	        || encoding_crc32(0, blob, size) != pipeline_cache_loaded_crc)
+	    && pipeline_file_path(path, sizeof(path), "parallel_rdp_pipeline_cache.bin"))
+		filestream_write_file_atomic(path, blob, (int64_t)size);
+	free(blob);
+}
+
 static bool create_processor(unsigned factor)
 {
 	CommandProcessorFlags flags = 0;
@@ -299,9 +421,6 @@ static bool create_processor(unsigned factor)
 		if (super_sampled_dither)
 			flags |= COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
 	}
-
-	if (upscaler_on)
-		flags |= COMMAND_PROCESSOR_FLAG_TEMPORAL_UPSCALER_BIT;
 
 	/* (the old one goes first: both at once may not fit) */
 	frontend.reset();
@@ -505,6 +624,7 @@ bool init()
 
 	device.reset(new Device);
 	device->set_context(*context);
+	pipeline_files_load();
 	device->init_frame_contexts(num_sync_frames);
 	log_cb(RETRO_LOG_INFO, "Using %u sync frames for parallel-RDP.\n", num_sync_frames);
 	device->set_queue_lock(
@@ -531,6 +651,7 @@ bool init()
 	upscaler_reset_pending = true;
 	if (!create_processor(upscaling))
 		return false;
+	frontend->build_pipelines_ahead(pipeline_list, pipeline_list_count);
 
 	timeline_value = 0;
 	pending_timeline_value = 0;
@@ -551,6 +672,8 @@ void deinit()
 	upscaler_iface = nullptr;
 	upscaler_on = false;
 	frontend.reset();
+	if (device)
+		pipeline_files_save();
 	device.reset();
 	context.reset();
 	timeline_trace_file.reset();
