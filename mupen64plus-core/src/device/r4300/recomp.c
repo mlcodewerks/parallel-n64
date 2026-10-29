@@ -273,6 +273,15 @@ void gen_MFC1(struct r4300_core* r4300);
 void gen_MFHI(struct r4300_core* r4300);
 void gen_MFLO(struct r4300_core* r4300);
 void gen_MTC0(struct r4300_core* r4300);
+void gen_BREAK(struct r4300_core* r4300);
+void gen_CFC2(struct r4300_core* r4300);
+void gen_CTC2(struct r4300_core* r4300);
+void gen_DCFC1(struct r4300_core* r4300);
+void gen_DCTC1(struct r4300_core* r4300);
+void gen_DMFC2(struct r4300_core* r4300);
+void gen_DMTC2(struct r4300_core* r4300);
+void gen_MFC2(struct r4300_core* r4300);
+void gen_MTC2(struct r4300_core* r4300);
 void gen_MTC1(struct r4300_core* r4300);
 void gen_MTHI(struct r4300_core* r4300);
 void gen_MTLO(struct r4300_core* r4300);
@@ -422,29 +431,53 @@ static void gen_CP1_CVT_S(struct r4300_core* r4300)
 #define gen_BC2TL      genni
 #define gen_BC2TL_IDLE genni
 #define gen_BC2TL_OUT  genni
-#define gen_BREAK      genni
 #define gen_CFC0       genni
-#define gen_CFC2       genni
 #define gen_CTC0       genni
-#define gen_CTC2       genni
-#define gen_DMFC2      genni
-#define gen_DMTC2      genni
 #define gen_JR_IDLE    genni
 #define gen_JR_OUT     gen_JR
 #define gen_JALR_IDLE  genni
 #define gen_JALR_OUT   gen_JALR
 #define gen_LDC2       genni
 #define gen_LWC2       genni
-#define gen_MFC2       genni
-#define gen_MTC2       genni
 #define gen_SDC2       genni
 #define gen_SWC2       genni
-#define gen_DCFC1      genni
 #define gen_DCFC2      genni
-#define gen_DCTC1      genni
 #define gen_DCTC2      genni
 
 #define X(op) gen_##op
+/* J/JAL, JR/JALR, the REGIMM, I-type and BC1 branches */
+static int recomp_has_delay_slot(uint32_t op)
+{
+    uint32_t major = op >> 26;
+
+    if (major == 0x00)
+        return (op & 0x3e) == 0x08;
+    if (major == 0x01)
+        return (((op >> 16) & 0x1f) & 0x0c) == 0x00;
+    if (major == 0x11)
+        return ((op >> 21) & 0x1f) == 0x08;
+    return (major >= 0x02 && major <= 0x07) || (major >= 0x14 && major <= 0x17);
+}
+
+/* SYSCALL, BREAK, the traps, DCFC1/DCTC1 and the COP2 moves, which the
+ * recompiler hands to the interpreter */
+static int recomp_slot_interpreted(uint32_t op)
+{
+    uint32_t major = op >> 26;
+    uint32_t fn = op & 0x3f;
+    uint32_t rs = (op >> 21) & 0x1f;
+    uint32_t rt = (op >> 16) & 0x1f;
+
+    switch (major)
+    {
+        case 0x00: return fn == 0x0c || fn == 0x0d || (fn >= 0x30 && fn <= 0x36 && fn != 0x35);
+        case 0x01: return rt >= 0x08 && rt <= 0x0e && rt != 0x0d;
+        case 0x11: return rs == 0x03 || rs == 0x07;
+        case 0x12: return rs <= 0x06 && rs != 0x03;
+        default: return 0;
+    }
+}
+
 static void (*const recomp_funcs[R4300_OPCODES_COUNT])(struct r4300_core* r4300) =
 {
 #include "opcodes.md"
@@ -681,9 +714,18 @@ void dynarec_recompile_block(struct r4300_core* r4300, const uint32_t* iw, struc
         }
 #endif
 
-        /* decode instruction */
+        /* decode instruction; a branch whose delay slot only the
+         * interpreter runs is run by the interpreter with it */
         opcode = r4300_decode(r4300->recomp.dst, r4300, r4300_get_idec(iw[i]), iw[i], iw[i+1], block);
-        recomp_funcs[opcode](r4300);
+        if (recomp_has_delay_slot(iw[i]) && recomp_slot_interpreted(iw[i+1]))
+        {
+            int no_compiled_jump = r4300->recomp.no_compiled_jump;
+            r4300->recomp.no_compiled_jump = 1;
+            recomp_funcs[opcode](r4300);
+            r4300->recomp.no_compiled_jump = no_compiled_jump;
+        }
+        else
+            recomp_funcs[opcode](r4300);
 
         if (r4300->recomp.delay_slot_compiled)
         {

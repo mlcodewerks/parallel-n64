@@ -83,11 +83,47 @@ static inline void jit_write_disable(void) { }
 #endif // HAVE_LIBNX
 #endif
 
+#if !defined(WIN32) && !defined(HAVE_LIBNX) && !(defined(__APPLE__) && defined(__aarch64__)) && !defined(RECOMP_DBG)
+#include <errno.h>
+#if defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+#include <unistd.h>
+#endif
+#include "cache_protect.h"
+
+/* Apply prot to the cache at g_dev.r4300.extra_memory through the host
+   pages that hold it; hosts without a page size query keep 4 KiB pages. */
+static void protect_extra_memory_cache(int prot)
+{
+  long page_size = 4096;
+  uintptr_t start;
+  size_t length;
+
+#if (defined(__linux__) || defined(__APPLE__) || defined(__unix__)) && defined(_SC_PAGESIZE)
+  page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0)
+    page_size = 4096;
+#endif
+
+  new_dynarec_cache_pages((uintptr_t)g_dev.r4300.extra_memory, sizeof(g_dev.r4300.extra_memory),
+                          (size_t)page_size, &start, &length);
+  if (mprotect((void*)start, length, prot) != 0)
+    DebugMessage(M64MSG_ERROR, "dynarec cache: mprotect of %lx+%lx failed (%d)",
+                 (unsigned long)start, (unsigned long)length, errno);
+}
+#endif
+
 #if defined(RECOMPILER_DEBUG) && !defined(RECOMP_DBG)
 void recomp_dbg_init(void);
 void recomp_dbg_cleanup(void);
 void recomp_dbg_block(int addr);
 #endif
+
+/* x86 instructions are byte-packed, so the displacements and immediates
+   read or patched in generated code sit at any alignment: go through
+   memcpy, which compiles to a plain mov on the hosts that allow it. */
+#define CODE_GET32(dst, p) memcpy(&(dst), (const void*)(p), 4)
+#define CODE_PUT32(p, v) do { uint32_t code_put32_ = (uint32_t)(v); memcpy((void*)(p), &code_put32_, 4); } while (0)
+#define CODE_PUT64(p, v) do { uint64_t code_put64_ = (uint64_t)(v); memcpy((void*)(p), &code_put64_, 8); } while (0)
 
 #if NEW_DYNAREC == NEW_DYNAREC_X86
 #include "x86/assem_x86.h"
@@ -259,6 +295,12 @@ void do_interrupt(void);
 void fp_exception(void);
 void jump_syscall(void);
 void jump_eret(void);
+void jump_intcall(void);
+
+/* TGE..TNE (SPECIAL 0x30-0x36) and TGEI..TNEI (REGIMM 0x08-0x0E) */
+#define IS_TRAP(w) (((w)>>26)==0x00 \
+    ? (((w)&0x3f)>=0x30&&((w)&0x3f)<=0x36&&((w)&0x3f)!=0x35) \
+    : ((w)>>26)==0x01&&(((w)>>16)&0x1f)>=0x08&&(((w)>>16)&0x1f)<=0x0e&&(((w)>>16)&0x1f)!=0x0d)
 void dyna_linker(void);
 void dyna_linker_ds(void);
 void breakpoint(void);
@@ -850,6 +892,12 @@ static void unneeded_registers(int istart,int iend,int r)
     else if(itype[i]==SYSCALL)
     {
       // SYSCALL instruction (software interrupt)
+      u=1;
+      uu=1;
+    }
+    else if(itype[i]==OTHER&&((source[i]&0xfc00003f)==0x0d||IS_TRAP(source[i])))
+    {
+      /* the exception handler may read any register */
       u=1;
       uu=1;
     }
@@ -1922,6 +1970,198 @@ void* ERET_new(void)
     }
 }
 
+/* Runs one instruction with no native form against fake_pc, whose rs and
+   rt operands are staged from the guest registers. Returns whether it
+   produced a value in state->rt for its rt register. */
+static int intcall_run(struct new_dynarec_hot_state* state, uint32_t op)
+{
+  int writes_rt = 0;
+
+  state->rs = state->regs[(op >> 21) & 0x1f];
+  state->rt = state->regs[(op >> 16) & 0x1f];
+
+  if (IS_TRAP(op))
+  {
+    if ((op >> 26) == 0x00)
+    {
+      switch (op & 0x3f)
+      {
+        case 0x30: cached_interp_TGE(); break;
+        case 0x31: cached_interp_TGEU(); break;
+        case 0x32: cached_interp_TLT(); break;
+        case 0x33: cached_interp_TLTU(); break;
+        case 0x34: cached_interp_TEQ(); break;
+        default: cached_interp_TNE(); break;
+      }
+    }
+    else
+    {
+      /* the immediate shares fake_pc's operand slots with rd */
+      state->fake_pc.f.i.immediate = (int16_t)op;
+      switch ((op >> 16) & 0x1f)
+      {
+        case 0x08: cached_interp_TGEI(); break;
+        case 0x09: cached_interp_TGEIU(); break;
+        case 0x0a: cached_interp_TLTI(); break;
+        case 0x0b: cached_interp_TLTIU(); break;
+        case 0x0c: cached_interp_TEQI(); break;
+        default: cached_interp_TNEI(); break;
+      }
+      state->fake_pc.f.r.rd = &state->rd;
+    }
+  }
+  else if ((op >> 26) == 0x11)
+  {
+    if (((op >> 21) & 0x1f) == 0x03)
+      cached_interp_DCFC1();
+    else
+      cached_interp_DCTC1();
+  }
+  else if ((op >> 26) == 0x12)
+  {
+    switch ((op >> 21) & 0x1f)
+    {
+      case 0x00: cached_interp_MFC2(); writes_rt = 1; break;
+      case 0x01: cached_interp_DMFC2(); writes_rt = 1; break;
+      case 0x02: cached_interp_CFC2(); writes_rt = 1; break;
+      case 0x04: cached_interp_MTC2(); break;
+      case 0x05: cached_interp_DMTC2(); break;
+      default: cached_interp_CTC2(); break;
+    }
+  }
+  else if ((op & 0xfc00003f) == 0x0c)
+    cached_interp_SYSCALL();
+  else
+    cached_interp_BREAK();
+
+  return writes_rt;
+}
+
+/* J/JAL, JR/JALR, the REGIMM, I-type and BC1 branches */
+static int intcall_is_branch(uint32_t op)
+{
+  uint32_t major = op >> 26;
+
+  if (major == 0x00)
+    return (op & 0x3e) == 0x08;
+  if (major == 0x01)
+    return (((op >> 16) & 0x1f) & 0x0c) == 0x00;
+  if (major == 0x11)
+    return ((op >> 21) & 0x1f) == 0x08;
+  return (major >= 0x02 && major <= 0x07) || (major >= 0x14 && major <= 0x17);
+}
+
+/* Writes the branch's link register and decides it: 1 taken to *target,
+   0 not taken, -1 a likely branch not taken, whose delay slot is skipped.
+   A BC1 branch with COP1 unusable raises its exception and returns 0. */
+static int intcall_branch(struct r4300_core* r4300, uint32_t pc, uint32_t op, uint32_t* target)
+{
+  struct new_dynarec_hot_state* state = &r4300->new_dynarec_hot_state;
+  uint32_t major = op >> 26;
+  int64_t rs = state->regs[(op >> 21) & 0x1f];
+  int64_t rt = state->regs[(op >> 16) & 0x1f];
+  int likely = 0;
+  int taken = 0;
+
+  *target = pc + 4 + ((uint32_t)(int32_t)(int16_t)op << 2);
+  switch (major)
+  {
+    case 0x00:
+      *target = (uint32_t)rs;
+      if ((op & 0x3f) == 0x09 && ((op >> 11) & 0x1f) != 0)
+        state->regs[(op >> 11) & 0x1f] = (int64_t)(int32_t)(pc + 8);
+      return 1;
+    case 0x01:
+      likely = (op >> 17) & 1;
+      taken = ((op >> 16) & 1) ? rs >= 0 : rs < 0;
+      if ((op >> 20) & 1)
+        state->regs[31] = (int64_t)(int32_t)(pc + 8);
+      break;
+    case 0x02:
+    case 0x03:
+      *target = ((pc + 4) & UINT32_C(0xf0000000)) | ((op & UINT32_C(0x03ffffff)) << 2);
+      if (major == 0x03)
+        state->regs[31] = (int64_t)(int32_t)(pc + 8);
+      return 1;
+    case 0x11:
+      if (check_cop1_unusable(r4300))
+        return 0;
+      likely = (op >> 17) & 1;
+      taken = ((*r4300_cp1_fcr31(&r4300->cp1) & FCR31_CMP_BIT) != 0) == (int)((op >> 16) & 1);
+      break;
+    default:
+      likely = major >= 0x14;
+      switch (major & 0x03)
+      {
+        case 0x00: taken = rs == rt; break;
+        case 0x01: taken = rs != rt; break;
+        case 0x02: taken = rs <= 0; break;
+        default: taken = rs > 0; break;
+      }
+      break;
+  }
+  return taken ? 1 : likely ? -1 : 0;
+}
+
+/* BREAK, the traps, the COP2 moves and DCFC1/DCTC1 have no native form,
+   nor does a branch whose delay slot holds one of them or SYSCALL: the
+   block writes the registers back and jump_intcall arrives here with the
+   instruction's address in pcaddr and the cycle count stored. A branch
+   runs its delay slot here too, then resumes at its destination. */
+void* intcall_new(void)
+{
+  struct r4300_core* r4300 = &g_dev.r4300;
+  struct new_dynarec_hot_state* state = &r4300->new_dynarec_hot_state;
+  uint32_t pc = state->pcaddr;
+  uint32_t op = *fast_mem_access(r4300, pc);
+  uint32_t target = 0;
+  uint32_t is64 = 0;
+  int writes_rt = 0;
+  int i;
+
+  r4300->delay_slot = 0;
+  state->pending_exception = 0;
+
+  if (intcall_is_branch(op))
+  {
+    int taken = intcall_branch(r4300, pc, op, &target);
+
+    if (!state->pending_exception)
+    {
+      if (taken >= 0)
+      {
+        state->pcaddr = pc + 4;
+        op = *fast_mem_access(r4300, pc + 4);
+        r4300->delay_slot = 1;
+        writes_rt = intcall_run(state, op);
+        r4300->delay_slot = 0;
+      }
+      if (!state->pending_exception)
+        state->pcaddr = taken > 0 ? target : pc + 8;
+    }
+  }
+  else
+    writes_rt = intcall_run(state, op);
+
+  if (writes_rt && ((op >> 16) & 0x1f) != 0 && !state->pending_exception)
+    state->regs[(op >> 16) & 0x1f] = state->rt;
+
+  r4300->cp0.last_addr = state->pcaddr;
+  if (state->cycle_count >= 0) { gen_interrupt(r4300); }
+
+  if (state->stop)
+    return NULL;
+
+  if (state->pending_exception)
+    return get_addr_ht(state->pcaddr);
+
+  for (i = 0; i < 32; i++)
+    is64 |= (((int)(state->regs[i] >> 32) ^ ((int)state->regs[i] >> 31)) != 0) << i;
+  is64 |= (((int)(state->hi >> 32) ^ ((int)state->hi >> 31)) != 0);
+  is64 |= (((int)(state->lo >> 32) ^ ((int)state->lo >> 31)) != 0);
+  return get_addr_32(state->pcaddr, is64);
+}
+
 /* Host backing of a TLB'd guest page. Aleck64 games map the arcade bus at
  * true physicals >= 0x80000000 (bit0-valid LUT scheme, see tlb_map): SDRAM
  * pages get direct pointers, I/O pages take the C stub path (-1), which
@@ -2483,7 +2723,11 @@ u_int verify_dirty(struct ll_entry * head)
     source=(void*)(head->start+(map_value<<2));
   }
   else
+  {
+    /* no other range holds compiled code: recompile rather than compare */
     assert(0);
+    return head->vaddr;
+  }
 
   if(memcmp(source,head->copy,head->length))
     return head->vaddr;
@@ -3460,7 +3704,7 @@ static void imm16_alloc(struct regstat *current,int i)
     current->is32|=1LL<<rt1[i];
   }
   else {
-    set_const(current,rt1[i],((long long)((short)imm[i]))<<16); // LUI
+    set_const(current,rt1[i],((long long)((short)imm[i]))*65536); // LUI
     current->is32|=1LL<<rt1[i];
   }
   dirty_reg(current,rt1[i]);
@@ -3773,6 +4017,12 @@ static void atomic_alloc(struct regstat *current,int i)
   current->isconst=0;
 }
 
+static void trap_alloc(struct regstat *current,int i)
+{
+  if(rs1[i]) alloc_reg(current,i,rs1[i]);
+  if(rs2[i]) alloc_reg(current,i,rs2[i]);
+}
+
 static void syscall_alloc(struct regstat *current,int i)
 {
   alloc_cc(current,i);
@@ -3931,8 +4181,10 @@ static void wb_invalidate(signed char pre[],signed char entry[],uint64_t dirty,u
   // overwrote a destination that a later move still had to read - a
   // 64-bit value whose halves were being relocated lost its upper word
   // that way, and the store that followed wrote the lower word twice.
-  // Emit a move only once nothing else still needs its destination, and
-  // break a cycle through the scratch register.
+  // Emit a move only once nothing else still needs its destination. A
+  // cycle is broken by moving one destination's value aside and pointing
+  // its readers there: into the scratch register, or, on a backend without
+  // one, into the source register through an exchange.
   {
     int src[HOST_REGS], dst[HOST_REGS], wide[HOST_REGS], n=0, k, progress;
     for(hr=0;hr<HOST_REGS;hr++) {
@@ -3965,14 +4217,23 @@ static void wb_invalidate(signed char pre[],signed char entry[],uint64_t dirty,u
       }
       if(!progress) {
         for(k=0;k<n;k++) {
+          int j;
           if(src[k]<0) continue;
-          /* cycle: stage this one through the scratch register */
+          #ifdef HOST_TEMPREG
           #ifdef NATIVE_64
-          if(wide[k]) { emit_mov64(src[k],HOST_TEMPREG); emit_mov64(HOST_TEMPREG,dst[k]); }
-          else
+          emit_mov64(dst[k],HOST_TEMPREG);
+          #else
+          emit_mov(dst[k],HOST_TEMPREG);
           #endif
-          { emit_mov(src[k],HOST_TEMPREG); emit_mov(HOST_TEMPREG,dst[k]); }
-          src[k]=-1; progress=1; break;
+          for(j=0;j<n;j++)
+            if(src[j]==dst[k]) src[j]=HOST_TEMPREG;
+          #else
+          emit_xchg(src[k],dst[k]);
+          for(j=0;j<n;j++)
+            if(j!=k&&src[j]==dst[k]) src[j]=src[k];
+          src[k]=-1;
+          #endif
+          progress=1; break;
         }
       }
     } while(progress);
@@ -4548,7 +4809,7 @@ static void address_generation(int i,struct regstat *i_regs,signed char entry[])
     int rm=get_reg(i_regs->regmap,TLREG);
     if(ra>=0) {
       int offset=imm[i];
-      int c=(i_regs->wasconst>>rs)&1;
+      int c=rs>=0&&((i_regs->wasconst>>rs)&1);
       if(rs1[i]==0) {
         // Using r0 as a base address
         /*if(rm>=0) {
@@ -4635,7 +4896,7 @@ static void address_generation(int i,struct regstat *i_regs,signed char entry[])
     if(ra>=0) {
       int rs=get_reg(regs[i+1].regmap,rs1[i+1]);
       int offset=imm[i+1];
-      int c=(regs[i+1].wasconst>>rs)&1;
+      int c=rs>=0&&((regs[i+1].wasconst>>rs)&1);
       if(c) {
         if(itype[i+1]==STORE||itype[i+1]==STORELR||opcode[i+1]==0x39||opcode[i+1]==0x3D) {
           // Stores to memory go thru the mapper to detect self-modifying
@@ -4659,7 +4920,7 @@ static void address_generation(int i,struct regstat *i_regs,signed char entry[])
     if(ra>=0) {
       int rs=get_reg(regs[i+1].regmap,rs1[i+1]);
       int offset=imm[i+1];
-      int c=(regs[i+1].wasconst>>rs)&1;
+      int c=rs>=0&&((regs[i+1].wasconst>>rs)&1);
       if(c) {
         int load=0;
         #ifndef INTERPRET_LOAD
@@ -4812,7 +5073,7 @@ static void do_ccstub(int n)
           emit_loadreg(rs2[i],s2l);
       #endif
       int hr=0;
-      int addr,alt,ntaddr;
+      int addr=0,alt=0,ntaddr=0;
       while(hr<HOST_REGS)
       {
         if(!IS_REG_EXCLUDED(hr) && hr!=HOST_CCREG &&
@@ -5051,6 +5312,11 @@ static void emit_xkphys_fold(int i,const struct regstat *i_regs,int addr)
 {
   signed char sh;
   intptr_t no_fold1,no_fold2,done;
+#ifdef HOST_TEMPREG
+  int temp=HOST_TEMPREG;
+#else
+  int temp=addr==EAX?ECX:EAX; /* saved around the fold */
+#endif
   if(rs1[i]==0) {
     emit_writeword(addr,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.address);
     return;
@@ -5059,10 +5325,13 @@ static void emit_xkphys_fold(int i,const struct regstat *i_regs,int addr)
     emit_writeword(addr,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.address);
     return;
   }
+#ifndef HOST_TEMPREG
+  emit_pushreg(temp);
+#endif
   sh=get_reg(i_regs->regmap,rs1[i]|64);
   if(sh<0) {
-    emit_loadreg(rs1[i]|64,HOST_TEMPREG);
-    sh=HOST_TEMPREG;
+    emit_loadreg(rs1[i]|64,temp);
+    sh=temp;
   }
   emit_testimm(sh,0x80000000);
   no_fold1=(intptr_t)out;
@@ -5070,16 +5339,19 @@ static void emit_xkphys_fold(int i,const struct regstat *i_regs,int addr)
   emit_testimm(sh,0x40000000);
   no_fold2=(intptr_t)out;
   emit_jne(0);
-  emit_mov(addr,HOST_TEMPREG);
-  emit_orimm(HOST_TEMPREG,0x80000000,HOST_TEMPREG);
-  emit_orimm(HOST_TEMPREG,0x20000000,HOST_TEMPREG);
-  emit_writeword(HOST_TEMPREG,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.address);
+  emit_mov(addr,temp);
+  emit_orimm(temp,0x80000000,temp);
+  emit_orimm(temp,0x20000000,temp);
+  emit_writeword(temp,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.address);
   done=(intptr_t)out;
   emit_jmp(0);
   set_jump_target(no_fold1,(intptr_t)out);
   set_jump_target(no_fold2,(intptr_t)out);
   emit_writeword(addr,(intptr_t)&g_dev.r4300.new_dynarec_hot_state.address);
   set_jump_target(done,(intptr_t)out);
+#ifndef HOST_TEMPREG
+  emit_popreg(temp);
+#endif
 }
 
 static void do_readstub(int n)
@@ -6139,7 +6411,7 @@ static void imm16_assemble(int i,struct regstat *i_regs)
       //assert(t>=0);
       if(t>=0) {
         if(!((i_regs->isconst>>t)&1))
-          emit_movimm(imm[i]<<16,t);
+          emit_movimm(imm[i]*65536,t);
       }
     }
   }
@@ -6781,7 +7053,7 @@ static void store_assemble(int i,struct regstat *i_regs)
 
 static void storelr_assemble(int i,struct regstat *i_regs)
 {
-  signed char s,th,tl,real_addr,addr,temp,temp2,map=-1;
+  signed char s,th,tl,real_addr,addr,temp,temp2=-1,map=-1;
   int offset,type=0,memtarget=0,c=0;
   intptr_t jaddr=0;
   u_int hr,reglist=0;
@@ -6845,8 +7117,8 @@ static void storelr_assemble(int i,struct regstat *i_regs)
 
   if(!c||memtarget)
   {
-    intptr_t case1,case2,case3;
-    intptr_t done0,done1,done2;
+    intptr_t case1=0,case2=0,case3=0;
+    intptr_t done0=0,done1=0,done2=0;
 
 #if NEW_DYNAREC >= NEW_DYNAREC_ARM
     assert(map>=0);
@@ -7306,10 +7578,6 @@ static void atomic_assemble(int i,struct regstat *i_regs)
   cc=get_reg(i_regs->regmap,CCREG);
   if(cc>=0) emit_storereg(CCREG,cc);
 
-  /* the address first, so the temp is free again before the call */
-  if(s>=0) emit_addimm(s,imm[i],HOST_TEMPREG);
-  else     emit_movimm(imm[i],HOST_TEMPREG);
-
   if(is_sc) {
     /* stage the value the helper is to store; this backend keeps a
      * doubleword as two host registers, so there is no single argument
@@ -7318,6 +7586,25 @@ static void atomic_assemble(int i,struct regstat *i_regs)
     if(is_d)
       emit_writeword(th>=0?th:t,((uintptr_t)&g_dev.r4300.new_dynarec_hot_state.rt)+4);
   }
+
+#if NEW_DYNAREC == NEW_DYNAREC_X86
+  /* the result register is free now: the address goes there, and the
+   * arguments go on the stack */
+  if(s>=0) emit_addimm(s,imm[i],t);
+  else     emit_movimm(imm[i],t);
+
+  save_regs(reglist);
+  if(!is_sc) emit_pushimm(CLOCK_DIVIDER*ccadj[i]);
+  emit_pushreg(t);
+  if(is_sc)
+    emit_call((intptr_t)(is_d ? (void*)SCD_new : (void*)SC_new));
+  else
+    emit_call((intptr_t)(is_d ? (void*)LLD_new : (void*)LL_new));
+  emit_addimm(ESP,is_sc?4:8,ESP);
+#else
+  /* the address first, so the temp is free again before the call */
+  if(s>=0) emit_addimm(s,imm[i],HOST_TEMPREG);
+  else     emit_movimm(imm[i],HOST_TEMPREG);
 
   save_regs(reglist);
   emit_mov(HOST_TEMPREG,ARG1_REG);
@@ -7328,6 +7615,7 @@ static void atomic_assemble(int i,struct regstat *i_regs)
     emit_movimm(CLOCK_DIVIDER*ccadj[i],ARG2_REG);
     emit_call((intptr_t)(is_d ? (void*)LLD_new : (void*)LL_new));
   }
+#endif
 
   restore_regs(reglist);
 
@@ -7342,8 +7630,89 @@ static void syscall_assemble(int i,struct regstat *i_regs)
   assert(ccreg==HOST_CCREG);
   assert(!is_delayslot);
   emit_movimm(start+i*4,0); // Get PC
-  emit_addimm(HOST_CCREG,CLOCK_DIVIDER*ccadj[i],HOST_CCREG); // CHECK: is this right?  There should probably be an extra cycle...
-  emit_jmp((intptr_t)jump_syscall);
+  if((source[i]&0xfc00003f)==0x0c) {
+    emit_addimm(HOST_CCREG,CLOCK_DIVIDER*ccadj[i],HOST_CCREG); /* CHECK: is this right?  There should probably be an extra cycle... */
+    emit_jmp((intptr_t)jump_syscall);
+  }
+  else {
+    /* Run through the interpreter, which charges nothing for it, then
+       resume at the next instruction, the branch destination or the
+       exception vector. A branch is charged with its delay slot. */
+    int n=intcall_is_branch(source[i])?2:1;
+    emit_addimm(HOST_CCREG,CLOCK_DIVIDER*(ccadj[i]+n),HOST_CCREG);
+    emit_jmp((intptr_t)jump_intcall);
+  }
+}
+
+/* BREAK and the traps stay OTHER-class instructions, so the guarded break
+   and teq compilers place after a division cost the register passes
+   nothing. Where the instruction may raise its exception, it writes the
+   registers back where it stands, as an exception exit does, and leaves
+   through jump_intcall, which runs it in the interpreter. */
+static void intcall_exit(int i,struct regstat *i_regs)
+{
+  load_all_consts(regs[i].regmap_entry,regs[i].was32,regs[i].wasdirty,regs[i].wasconst,i);
+  wb_exception_dirtys(i_regs);
+  emit_movimm(start+i*4,0);
+  if(i_regs->regmap[HOST_CCREG]!=CCREG) emit_loadreg(CCREG,HOST_CCREG);
+  emit_addimm(HOST_CCREG,CLOCK_DIVIDER*(ccadj[i]+1),HOST_CCREG);
+  emit_jmp((intptr_t)jump_intcall);
+}
+
+/* TEQ and TEQI cannot trap while the low words differ, so only an equal
+   low word leaves for the interpreter, which compares all 64 bits and
+   either raises the exception or resumes after the trap. The other traps,
+   which compilers do not emit, always leave. A constant source may not be
+   in its host register yet, so it is compared by value. */
+static void trap_assemble(int i,struct regstat *i_regs)
+{
+  int teq=(opcode[i]==0x00&&(source[i]&0x3f)==0x34)||(opcode[i]==0x01&&((source[i]>>16)&0x1f)==0x0c);
+  signed char s1=rs1[i]?get_reg(i_regs->regmap,rs1[i]):-1;
+  signed char s2=rs2[i]?get_reg(i_regs->regmap,rs2[i]):-1;
+  int c1=0,c2=0;
+  int v1=0,v2=0;
+  intptr_t jaddr=0;
+
+  if(rs1[i]) {
+    assert(s1>=0);
+    c1=(i_regs->wasconst>>s1)&1;
+    if(c1) v1=(int)constmap[i][s1];
+  }
+  if(opcode[i]==0x01) {
+    c2=1;
+    v2=imm[i];
+  }
+  else if(rs2[i]) {
+    assert(s2>=0);
+    c2=(i_regs->wasconst>>s2)&1;
+    if(c2) v2=(int)constmap[i][s2];
+  }
+  else
+    c2=1;
+
+  if(teq) {
+    if(!rs1[i]) c1=1;
+    if(c1&&c2) {
+      if(v1!=v2) return;
+    }
+    else if(!c1&&!c2) {
+      emit_cmp(s1,s2);
+      jaddr=(intptr_t)out;
+      emit_jne(0);
+    }
+    else {
+      signed char s=c1?s2:s1;
+      int v=c1?v1:v2;
+      if(v>-65536&&v<65536) {
+        if(v) emit_cmpimm(s,v);
+        else emit_test(s,s);
+        jaddr=(intptr_t)out;
+        emit_jne(0);
+      }
+    }
+  }
+  intcall_exit(i,i_regs);
+  if(jaddr) set_jump_target(jaddr,(intptr_t)out);
 }
 
 static void ds_assemble(int i,struct regstat *i_regs)
@@ -8600,7 +8969,7 @@ static void pagespan_assemble(int i,struct regstat *i_regs)
     s1h=s2h=-1;
   }
   int hr=0;
-  int addr,alt,ntaddr;
+  int addr=0,alt=0,ntaddr=0;
   if(i_regs->regmap[HOST_BTREG]<0) {addr=HOST_BTREG;}
   else {
     while(hr<HOST_REGS)
@@ -9087,8 +9456,7 @@ void new_dynarec_init(void)
   close(fd);
 #endif // HAVE_LIBNX
 #elif CACHE_ADDR==FIXED_CACHE_ADDR
-  mprotect ((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
-            PROT_READ | PROT_WRITE | PROT_EXEC);
+  protect_extra_memory_cache(PROT_READ | PROT_WRITE | PROT_EXEC);
   base_addr = g_dev.r4300.extra_memory;
   base_addr_rx = base_addr;
 #else /*DYNAMIC_CACHE_ADDR*/
@@ -9099,8 +9467,7 @@ void new_dynarec_init(void)
   base_addr_rx = base_addr;
 #endif
 #elif NEW_DYNAREC == NEW_DYNAREC_ARM
-  mprotect ((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
-            PROT_READ | PROT_WRITE | PROT_EXEC);
+  protect_extra_memory_cache(PROT_READ | PROT_WRITE | PROT_EXEC);
   base_addr = g_dev.r4300.extra_memory;
   base_addr_rx = base_addr;
 #else
@@ -9110,8 +9477,7 @@ void new_dynarec_init(void)
   assert(res!=0);
   base_addr = base_addr_rx = (void*)g_dev.r4300.extra_memory;
 #else
-  mprotect ((u_char *)g_dev.r4300.extra_memory, 1<<TARGET_SIZE_2,
-            PROT_READ | PROT_WRITE | PROT_EXEC);
+  protect_extra_memory_cache(PROT_READ | PROT_WRITE | PROT_EXEC);
   base_addr = g_dev.r4300.extra_memory;
   base_addr_rx = base_addr;
 #endif
@@ -9185,7 +9551,7 @@ void new_dynarec_cleanup(void)
   #elif NEW_DYNAREC == NEW_DYNAREC_ARM64 && CACHE_ADDR!=FIXED_CACHE_ADDR
     if (munmap (base_addr_rx, 1<<TARGET_SIZE_2) < 0) {DebugMessage(M64MSG_ERROR, "munmap() failed");}
   #else
-    mprotect(base_addr, 1<<TARGET_SIZE_2, PROT_READ | PROT_WRITE);
+    protect_extra_memory_cache(PROT_READ | PROT_WRITE);
   #endif
 #endif
 }
@@ -9337,12 +9703,12 @@ int new_recompile_block(int addr)
           case 0x2D: assem_strcpy(insn[i],"DADDU"); type=ALU; break;
           case 0x2E: assem_strcpy(insn[i],"DSUB"); type=ALU; break;
           case 0x2F: assem_strcpy(insn[i],"DSUBU"); type=ALU; break;
-          case 0x30: assem_strcpy(insn[i],"TGE"); type=NI; break;
-          case 0x31: assem_strcpy(insn[i],"TGEU"); type=NI; break;
-          case 0x32: assem_strcpy(insn[i],"TLT"); type=NI; break;
-          case 0x33: assem_strcpy(insn[i],"TLTU"); type=NI; break;
-          case 0x34: assem_strcpy(insn[i],"TEQ"); type=NI; break;
-          case 0x36: assem_strcpy(insn[i],"TNE"); type=NI; break;
+          case 0x30: assem_strcpy(insn[i],"TGE"); type=OTHER; break;
+          case 0x31: assem_strcpy(insn[i],"TGEU"); type=OTHER; break;
+          case 0x32: assem_strcpy(insn[i],"TLT"); type=OTHER; break;
+          case 0x33: assem_strcpy(insn[i],"TLTU"); type=OTHER; break;
+          case 0x34: assem_strcpy(insn[i],"TEQ"); type=OTHER; break;
+          case 0x36: assem_strcpy(insn[i],"TNE"); type=OTHER; break;
           case 0x38: assem_strcpy(insn[i],"DSLL"); type=SHIFTIMM; break;
           case 0x3A: assem_strcpy(insn[i],"DSRL"); type=SHIFTIMM; break;
           case 0x3B: assem_strcpy(insn[i],"DSRA"); type=SHIFTIMM; break;
@@ -9359,12 +9725,12 @@ int new_recompile_block(int addr)
           case 0x01: assem_strcpy(insn[i],"BGEZ"); type=SJUMP; break;
           case 0x02: assem_strcpy(insn[i],"BLTZL"); type=SJUMP; break;
           case 0x03: assem_strcpy(insn[i],"BGEZL"); type=SJUMP; break;
-          case 0x08: assem_strcpy(insn[i],"TGEI"); type=NI; break;
-          case 0x09: assem_strcpy(insn[i],"TGEIU"); type=NI; break;
-          case 0x0A: assem_strcpy(insn[i],"TLTI"); type=NI; break;
-          case 0x0B: assem_strcpy(insn[i],"TLTIU"); type=NI; break;
-          case 0x0C: assem_strcpy(insn[i],"TEQI"); type=NI; break;
-          case 0x0E: assem_strcpy(insn[i],"TNEI"); type=NI; break;
+          case 0x08: assem_strcpy(insn[i],"TGEI"); type=OTHER; break;
+          case 0x09: assem_strcpy(insn[i],"TGEIU"); type=OTHER; break;
+          case 0x0A: assem_strcpy(insn[i],"TLTI"); type=OTHER; break;
+          case 0x0B: assem_strcpy(insn[i],"TLTIU"); type=OTHER; break;
+          case 0x0C: assem_strcpy(insn[i],"TEQI"); type=OTHER; break;
+          case 0x0E: assem_strcpy(insn[i],"TNEI"); type=OTHER; break;
           case 0x10: assem_strcpy(insn[i],"BLTZAL"); type=SJUMP; break;
           case 0x11: assem_strcpy(insn[i],"BGEZAL"); type=SJUMP; break;
           case 0x12: assem_strcpy(insn[i],"BLTZALL"); type=SJUMP; break;
@@ -9411,9 +9777,11 @@ int new_recompile_block(int addr)
           case 0x00: assem_strcpy(insn[i],"MFC1"); type=COP1; break;
           case 0x01: assem_strcpy(insn[i],"DMFC1"); type=COP1; break;
           case 0x02: assem_strcpy(insn[i],"CFC1"); type=COP1; break;
+          case 0x03: assem_strcpy(insn[i],"DCFC1"); type=SYSCALL; break;
           case 0x04: assem_strcpy(insn[i],"MTC1"); type=COP1; break;
           case 0x05: assem_strcpy(insn[i],"DMTC1"); type=COP1; break;
           case 0x06: assem_strcpy(insn[i],"CTC1"); type=COP1; break;
+          case 0x07: assem_strcpy(insn[i],"DCTC1"); type=SYSCALL; break;
           case 0x08: assem_strcpy(insn[i],"BC1"); type=FJUMP;
           switch((source[i]>>16)&0x3)
           {
@@ -9517,6 +9885,19 @@ int new_recompile_block(int addr)
             case 0x21: assem_strcpy(insn[i],"CVT.D.L"); type=FCONV; break;
           }
           break;
+        }
+        break;
+      /* COP2 moves run through the interpreter (intcall_new) */
+      case 0x12: assem_strcpy(insn[i],"cop2"); type=NI;
+        op2=(source[i]>>21)&0x1f;
+        switch(op2)
+        {
+          case 0x00: assem_strcpy(insn[i],"MFC2"); type=SYSCALL; break;
+          case 0x01: assem_strcpy(insn[i],"DMFC2"); type=SYSCALL; break;
+          case 0x02: assem_strcpy(insn[i],"CFC2"); type=SYSCALL; break;
+          case 0x04: assem_strcpy(insn[i],"MTC2"); type=SYSCALL; break;
+          case 0x05: assem_strcpy(insn[i],"DMTC2"); type=SYSCALL; break;
+          case 0x06: assem_strcpy(insn[i],"CTC2"); type=SYSCALL; break;
         }
         break;
       case 0x14: assem_strcpy(insn[i],"BEQL"); type=CJUMP; break;
@@ -9783,6 +10164,14 @@ int new_recompile_block(int addr)
         rt1[i]=0;
         rt2[i]=0;
     }
+    /* Traps compare their full 64-bit sources */
+    if(type==OTHER&&IS_TRAP(source[i])) {
+      rs1[i]=(source[i]>>21)&0x1f;
+      rs2[i]=(op==0x00)?(source[i]>>16)&0x1f:0;
+      us1[i]=rs1[i];
+      us2[i]=rs2[i];
+      imm[i]=(short)source[i];
+    }
     /* Calculate branch target addresses */
     if(type==UJUMP)
       ba[i]=((start+i*4+4)&0xF0000000)|(((unsigned int)source[i]<<6)>>4);
@@ -9833,14 +10222,37 @@ int new_recompile_block(int addr)
       if(i>MAXBLOCK/2) done=1;
     }
     if(i>0&&itype[i]==SYSCALL&&stop_after_jal) done=1;
-    assert(i<MAXBLOCK-1);
+    assert(i<MAXBLOCK-2);
     if(start+i*4==pagelimit-4) done=1;
     assert(start+i*4<pagelimit);
-    if (i==MAXBLOCK-1) done=1;
+    /* The passes below look two entries past the last instruction, so end
+       a long straight run at MAXBLOCK-3, keeping a branch's delay slot. */
+    if(i==MAXBLOCK-3) done=1;
+    if(i==MAXBLOCK-4&&itype[i]!=UJUMP&&itype[i]!=CJUMP&&itype[i]!=SJUMP&&itype[i]!=RJUMP&&itype[i]!=FJUMP) done=1;
     // Stop if we're compiling junk
     if(itype[i]==NI&&opcode[i]==0x11) {
       done=stop_after_jal=1;
       DebugMessage(M64MSG_VERBOSE, "Disabled speculative precompilation");
+    }
+    /* A delay slot only the interpreter runs takes its branch along: the
+       branch leaves through jump_intcall, which runs both, and ends the
+       block there. */
+    if(i>0&&(itype[i-1]==UJUMP||itype[i-1]==RJUMP||itype[i-1]==CJUMP||itype[i-1]==SJUMP||itype[i-1]==FJUMP)
+       &&(itype[i]==SYSCALL||(itype[i]==OTHER&&((source[i]&0xfc00003f)==0x0d||IS_TRAP(source[i])))))
+    {
+      itype[i-1]=SYSCALL;
+      rs1[i-1]=CCREG;
+      rs2[i-1]=0;
+      rt1[i-1]=0;
+      rt2[i-1]=0;
+      us1[i-1]=0;
+      us2[i-1]=0;
+      dep1[i-1]=0;
+      dep2[i-1]=0;
+      ba[i-1]=-1;
+      likely[i-1]=0;
+      done=1;
+      i--;
     }
   }
   slen=i;
@@ -10437,6 +10849,9 @@ int new_recompile_block(int addr)
         case SYSCALL:
           syscall_alloc(&current,i);
           break;
+        case OTHER:
+          if(IS_TRAP(source[i])) trap_alloc(&current,i);
+          break;
         case ATOMIC:
           atomic_alloc(&current,i);
           break;
@@ -10893,10 +11308,6 @@ int new_recompile_block(int addr)
           }
         }
       }
-      // Don't need stuff which is overwritten
-      //FIXME
-      if(regs[i].regmap[hr]!=regmap_pre[i][hr]) nr&=~(1LL<<hr);
-      if(regs[i].regmap[hr]<0) nr&=~(1LL<<hr);
       // Merge in delay slot
       for(hr=0;hr<HOST_REGS;hr++)
       {
@@ -12102,6 +12513,10 @@ int new_recompile_block(int addr)
           mov_assemble(i,&regs[i]);break;
         case SYSCALL:
           syscall_assemble(i,&regs[i]);break;
+        case OTHER:
+          if((source[i]&0xfc00003f)==0x0d) intcall_exit(i,&regs[i]);
+          else if(IS_TRAP(source[i])) trap_assemble(i,&regs[i]);
+          break;
         case ATOMIC:
           atomic_assemble(i,&regs[i]);break;
         case UJUMP:

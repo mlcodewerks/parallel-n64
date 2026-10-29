@@ -117,6 +117,7 @@ static u_int jump_table_symbols[] = {
   (int)fp_exception,
   (int)jump_syscall,
   (int)jump_eret,
+  (int)jump_intcall,
   (int)do_interrupt,
   (int)TLBWI_new,
   (int)TLBWR_new,
@@ -934,6 +935,7 @@ static u_int genimm(u_int imm,u_int *encoded)
     }
     imm=(imm>>2)|(imm<<30);i-=2;
   }
+  *encoded=0;
   return 0;
 }
 static u_int genjmp(u_int addr)
@@ -2209,10 +2211,10 @@ static void emit_mov2imm_compact(int imm1,u_int rt1,int imm2,u_int rt2)
 {
   emit_movimm(imm1,rt1);
   u_int armval;
-  if(genimm(imm2-imm1,&armval)) {
+  if(genimm((u_int)imm2-(u_int)imm1,&armval)) {
     assem_debug("add %s,%s,#%d",regname[rt2],regname[rt1],imm2-imm1);
     output_w32(0xe2800000|rd_rn_rm(rt2,rt1,0)|armval);
-  }else if(genimm(imm1-imm2,&armval)) {
+  }else if(genimm((u_int)imm1-(u_int)imm2,&armval)) {
     assem_debug("sub %s,%s,#%d",regname[rt2],regname[rt1],imm1-imm2);
     output_w32(0xe2400000|rd_rn_rm(rt2,rt1,0)|armval);
   }

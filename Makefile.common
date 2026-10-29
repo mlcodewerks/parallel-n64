@@ -189,14 +189,8 @@ ifdef WITH_DYNAREC
 		DYNAFLAGS += -D_M_IX86
 		CFLAGS += -DARCH_MIN_SSE2 
 		CXXFLAGS += -DARCH_MIN_SSE2
-		# NOTE: the 32-bit (x86/i686) ari64 dynarec is NOT built by default: its
-		# codegen unit (new_dynarec/x86/assem_x86.c, which defines new_dyna_start,
-		# invalidate_block_*, jump_vaddr_*, the dyna_linker family, ...) is not
-		# wired into the build, so enabling it produces an unlinkable core. i686
-		# therefore runs the interpreters only. Do not default HAVE_ARI64_X86 on.
-		# -DDYNAREC is only set when a backend is actually compiled, otherwise the
-		# core references ari64 entry points (new_dyna_start, ...) that do not
-		# exist and fails to link.
+		# -DDYNAREC only with a backend compiled in: the Makefile turns
+		# HAVE_ARI64_X86 on where it sets up nasm for the linkage.
 		ifeq ($(HAVE_ARI64_X86), 1)
 			DYNAFLAGS += -DDYNAREC
 			DYNAFLAGS += -DNEW_DYNAREC=1
@@ -322,6 +316,14 @@ SOURCES_C += $(LIBRETRO_DIR)/libretro.c \
 				 $(LIBRETRO_COMM_DIR)/memmap/memalign.c \
 				 $(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c \
 				 $(LIBRETRO_COMM_DIR)/encodings/encoding_deflate.c \
+				 $(LIBRETRO_COMM_DIR)/formats/zip/rzip_archive.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_archive.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_lzma.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_lzma_stream.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_lzma2.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_bcj2.c \
+				 $(LIBRETRO_COMM_DIR)/formats/7z/r7z_filters.c \
+				 $(LIBRETRO_COMM_DIR)/formats/rar/rrar_ppmd7.c \
 				 $(LIBRETRO_COMM_DIR)/formats/png/rpng.c \
 				 $(LIBRETRO_COMM_DIR)/formats/png/rpng_encode.c \
 				 $(LIBRETRO_COMM_DIR)/file/rpng_file.c \

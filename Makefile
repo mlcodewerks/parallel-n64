@@ -920,18 +920,16 @@ ifeq ($(WITH_DYNAREC), $(filter $(WITH_DYNAREC), x86_64 x64))
    endif
 endif
 ifeq ($(WITH_DYNAREC), x86)
-   # The 32-bit (i686) ari64 dynarec is not built: its win32 linkage is emitted
-   # without the leading-underscore symbol decoration the Win32 cdecl ABI
-   # requires (NASMFLAGS lacks -DLEADING_UNDERSCORE), so it does not link, and
-   # the path is otherwise unvalidated in this fork. Leave HAVE_ARI64_X86 off so
-   # i686 builds the interpreters only. Set HAVE_ARI64_X86=1 explicitly to opt in
-   # if/when the 32-bit linkage is fixed.
+   # The 32-bit (i686) ari64 dynarec; HAVE_ARI64_X86=0 builds the
+   # interpreters only.
+   ifneq (,$(findstring unix,$(platform)))
+      HAVE_ARI64_X86 ?= 1
+      NASMFLAGS = -f elf32 -DELF_TYPE -DPIC
+   else ifneq (,$(findstring win,$(platform)))
+      HAVE_ARI64_X86 ?= 1
+      NASMFLAGS = -f win32 -DLEADING_UNDERSCORE
+   endif
    ifeq ($(HAVE_ARI64_X86), 1)
-      ifneq (,$(findstring unix,$(platform)))
-         NASMFLAGS = -f elf32 -DELF_TYPE
-      else ifneq (,$(findstring win,$(platform)))
-         NASMFLAGS = -f win32 -DLEADING_UNDERSCORE
-      endif
       # The generated code and linkage only keep 4-byte stack alignment
       # (the pre-SSE i386 ABI); have gcc realign in functions that spill
       # SSE registers instead of assuming 16-byte incoming alignment.
@@ -1145,7 +1143,7 @@ endif
 %.o: %.asm
 	$(NASM) $(NASMFLAGS) -i$(ASM_DEFINES_DIR)/ -o $@ $<
 
-# region 14: the x64 asm_defines headers (x64/asm_defines_{nasm,gas}.h) are
+# region 14: the asm_defines headers (x64/ and x86/asm_defines_{nasm,gas}.h) are
 # GENERATED from the shared C struct (new_dynarec_hot_state) but COMMITTED to the
 # tree and treated as source. A normal build NEVER regenerates or touches them --
 # doing so on every compile needlessly rebuilt the assembly and (on Windows, via
@@ -1160,11 +1158,17 @@ endif
 AWK     ?= awk
 STRINGS ?= strings
 TR      ?= tr
+ifeq ($(WITH_DYNAREC), x86)
+ASM_DEFINES_DIR := $(CORE_DIR)/src/device/r4300/new_dynarec/x86
+ASM_DEFINES_DYNAREC := 1
+else
 ASM_DEFINES_DIR := $(CORE_DIR)/src/device/r4300/new_dynarec/x64
+ASM_DEFINES_DYNAREC := 2
+endif
 
 .PHONY: asm-defines-regen
 asm-defines-regen:
-	$(CC) $(CFLAGS) $(DYNAFLAGS) -DNEW_DYNAREC=2 -c $(CORE_DIR)/src/asm_defines/asm_defines.c $(OBJOUT)$(CORE_DIR)/src/asm_defines/asm_defines.o
+	$(CC) $(CFLAGS) $(DYNAFLAGS) -DNEW_DYNAREC=$(ASM_DEFINES_DYNAREC) -c $(CORE_DIR)/src/asm_defines/asm_defines.c $(OBJOUT)$(CORE_DIR)/src/asm_defines/asm_defines.o
 	$(STRINGS) "$(CORE_DIR)/src/asm_defines/asm_defines.o" | $(TR) -d '\r' | $(AWK) -v dest_dir="$(ASM_DEFINES_DIR)" -f $(CORE_DIR)/tools/gen_asm_defines.awk
 	$(RM) $(CORE_DIR)/src/asm_defines/asm_defines.o
 
@@ -1203,7 +1207,7 @@ clean: clean-tools
 
 clean-tools:
 	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) dd_ipl_hle_test$(EXE_EXT) \
-		$(CORE_CHECKS) tools/test_prsp_dmem_wrap.o tools/test_command_ring_rthreads.o tools/test_command_ring_ec.o
+		$(CORE_CHECKS) dynarec_long_block_test$(EXE_EXT) savestate_latch_test$(EXE_EXT) cpu_fallback_test$(EXE_EXT) tools/test_prsp_dmem_wrap.o tools/test_command_ring_rthreads.o tools/test_command_ring_ec.o
 
 # Angrylion benchmark and bit-exactness harnesses (tools/angrylion_*.c),
 # linked against the core's own angrylion objects: `make tools` after a
@@ -1350,6 +1354,76 @@ check-dd-ipl: $(TARGET) lrhost$(EXE_EXT) dd_ipl_hle_test$(EXE_EXT)
 		./dd_ipl_hle_test$(EXE_EXT) check $(DD_IPL_CHECK_DIR)/ram_$$n.bin $$n; \
 	done; rm -rf $(DD_IPL_CHECK_DIR)
 
+# A straight-line block longer than ari64's instruction buffer, booted
+# through the core with each CPU core. Built with SANITIZER=address,undefined
+# it also fails on any memory error or undefined behaviour in the CPU cores.
+DYNAREC_BLOCK_CHECK_DIR := dynarec_block_check.tmp
+
+dynarec_long_block_test$(EXE_EXT): tools/dynarec_long_block_test.c
+	$(CC) -O1 -g $< -o $@
+
+check-dynarec-block: $(TARGET) lrhost$(EXE_EXT) dynarec_long_block_test$(EXE_EXT)
+	@set -e; rm -rf $(DYNAREC_BLOCK_CHECK_DIR); mkdir -p $(DYNAREC_BLOCK_CHECK_DIR)/lrhost-system; \
+	./dynarec_long_block_test$(EXE_EXT) rom $(DYNAREC_BLOCK_CHECK_DIR)/long_block.z64; \
+	for core in pure_interpreter cached_interpreter dynamic_recompiler dynamic_recompiler_ari64; do \
+		echo "== $$core"; \
+		( cd $(DYNAREC_BLOCK_CHECK_DIR) && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LRHOST_RAMDUMP=ram_$$core.bin ../lrhost$(EXE_EXT) ../$(TARGET) long_block.z64 4 \
+			parallel-n64-gfxplugin=angrylion parallel-n64-rspplugin=hle \
+			parallel-n64-cpucore=$$core > /dev/null ); \
+		./dynarec_long_block_test$(EXE_EXT) check $(DYNAREC_BLOCK_CHECK_DIR)/ram_$$core.bin; \
+	done; rm -rf $(DYNAREC_BLOCK_CHECK_DIR)
+
+# The COP0 and COP2 move latches across a savestate: a state saved between
+# the moves and their read-back is loaded into a fresh boot, with each CPU
+# core. The `saved` step checks the save frame lands in that window.
+SAVESTATE_LATCH_CHECK_DIR := savestate_latch_check.tmp
+SAVESTATE_LATCH_SAVE_AT := 16
+
+savestate_latch_test$(EXE_EXT): tools/savestate_latch_test.c
+	$(CC) -O1 -g $< -o $@
+
+check-savestate-latch: $(TARGET) lrhost$(EXE_EXT) savestate_latch_test$(EXE_EXT)
+	@set -e; rm -rf $(SAVESTATE_LATCH_CHECK_DIR); mkdir -p $(SAVESTATE_LATCH_CHECK_DIR)/lrhost-system; \
+	./savestate_latch_test$(EXE_EXT) rom $(SAVESTATE_LATCH_CHECK_DIR)/latch.z64; \
+	for core in pure_interpreter cached_interpreter dynamic_recompiler dynamic_recompiler_ari64; do \
+		echo "== $$core"; \
+		( cd $(SAVESTATE_LATCH_CHECK_DIR) && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LRHOST_SAVE=state_$$core.bin LRHOST_SAVE_AT=$(SAVESTATE_LATCH_SAVE_AT) \
+			LRHOST_RAMDUMP=saved_$$core.bin ../lrhost$(EXE_EXT) ../$(TARGET) latch.z64 $$(( $(SAVESTATE_LATCH_SAVE_AT) + 1 )) \
+			parallel-n64-gfxplugin=angrylion parallel-n64-rspplugin=hle \
+			parallel-n64-cpucore=$$core > /dev/null ); \
+		./savestate_latch_test$(EXE_EXT) saved $(SAVESTATE_LATCH_CHECK_DIR)/saved_$$core.bin; \
+		( cd $(SAVESTATE_LATCH_CHECK_DIR) && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LRHOST_STATE=state_$$core.bin LRHOST_RAMDUMP=ram_$$core.bin \
+			../lrhost$(EXE_EXT) ../$(TARGET) latch.z64 120 \
+			parallel-n64-gfxplugin=angrylion parallel-n64-rspplugin=hle \
+			parallel-n64-cpucore=$$core > /dev/null ); \
+		./savestate_latch_test$(EXE_EXT) check $(SAVESTATE_LATCH_CHECK_DIR)/ram_$$core.bin; \
+	done; rm -rf $(SAVESTATE_LATCH_CHECK_DIR)
+
+# Instructions the recompilers run through the interpreter (BREAK, the
+# COP2 moves, DCFC1/DCTC1): the pure interpreter's exception and value log is
+# the reference, and every other CPU core must log the same.
+CPU_FALLBACK_CHECK_DIR := cpu_fallback_check.tmp
+
+cpu_fallback_test$(EXE_EXT): tools/cpu_fallback_test.c
+	$(CC) -O1 -g $< -o $@
+
+check-cpu-fallback: $(TARGET) lrhost$(EXE_EXT) cpu_fallback_test$(EXE_EXT)
+	@set -e; rm -rf $(CPU_FALLBACK_CHECK_DIR); mkdir -p $(CPU_FALLBACK_CHECK_DIR)/lrhost-system; \
+	./cpu_fallback_test$(EXE_EXT) rom $(CPU_FALLBACK_CHECK_DIR)/fallback.z64; \
+	for core in pure_interpreter cached_interpreter dynamic_recompiler dynamic_recompiler_ari64; do \
+		echo "== $$core"; \
+		( cd $(CPU_FALLBACK_CHECK_DIR) && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 LRHOST_RAMDUMP=ram_$$core.bin \
+			../lrhost$(EXE_EXT) ../$(TARGET) fallback.z64 4 \
+			parallel-n64-gfxplugin=angrylion parallel-n64-rspplugin=hle \
+			parallel-n64-cpucore=$$core > /dev/null ); \
+		if [ $$core = pure_interpreter ]; then \
+			./cpu_fallback_test$(EXE_EXT) check $(CPU_FALLBACK_CHECK_DIR)/ram_$$core.bin; \
+		else \
+			./cpu_fallback_test$(EXE_EXT) compare $(CPU_FALLBACK_CHECK_DIR)/ram_pure_interpreter.bin \
+				$(CPU_FALLBACK_CHECK_DIR)/ram_$$core.bin; \
+		fi; \
+	done; rm -rf $(CPU_FALLBACK_CHECK_DIR)
+
 # Core self-tests: MMIO register and DMA bounds, the frontend memory map,
 # framebuffer write notifications, COP0 exceptions, PI status, the MusyX
 # voice loaders, the BOSS audio arithmetic and, in a HAVE_PARALLEL_RSP=1
@@ -1404,7 +1478,7 @@ test_fpu_compare$(EXE_EXT): tools/test_fpu_compare.c
 		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lm
 
 TEST_R4300_INTERP_SRCS := $(CORE_DEVICE_DIR)/r4300/cp0.c $(CORE_DEVICE_DIR)/r4300/interrupt.c \
-	$(CORE_DEVICE_DIR)/r4300/cp1.c
+	$(CORE_DEVICE_DIR)/r4300/cp1.c $(CORE_DEVICE_DIR)/r4300/idec.c
 test_r4300_interp$(EXE_EXT): tools/test_r4300_interp.c $(CORE_DEVICE_DIR)/r4300/pure_interp.c \
 		$(CORE_DEVICE_DIR)/r4300/mips_instructions.def $(TEST_R4300_INTERP_SRCS)
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
@@ -1434,6 +1508,19 @@ test_hle_dispatch$(EXE_EXT): tools/test_hle_dispatch.c $(RSPDIR)/src/hle.c $(RSP
 test_pif_write$(EXE_EXT): tools/test_pif_write.c $(CORE_DEVICE_DIR)/pif/pif.c
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
 		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+TEST_GB_CART_SRCS := $(CORE_DEVICE_DIR)/gb/gb_cart.c $(CORE_DEVICE_DIR)/gb/mbc3_rtc.c \
+	$(CORE_DEVICE_DIR)/gb/m64282fp.c
+
+test_gb_cart_banks$(EXE_EXT): tools/test_gb_cart_banks.c $(TEST_GB_CART_SRCS)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src -I$(CORE_DIR)/src/api \
+		-I$(CORE_DIR)/custom -I$(LIBRETRO_COMM_DIR)/include -I$(ROOT_DIR)/libretro \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+test_dynarec_cache_pages$(EXE_EXT): tools/test_dynarec_cache_pages.c \
+		$(CORE_DEVICE_DIR)/r4300/new_dynarec/cache_protect.h
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(CORE_DIR)/src \
 		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
 test_re2_fill$(EXE_EXT): tools/test_re2_fill.c $(RSPDIR)/src/re2.c $(RSPDIR)/src/hle_memory.c
@@ -1504,7 +1591,7 @@ CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write
 	test_musyx_bounds$(EXE_EXT) test_musyx_aux$(EXE_EXT) test_alist_ops$(EXE_EXT) test_alist_abi1$(EXE_EXT) test_hle_dispatch$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT) \
 	test_mouse_accum$(EXE_EXT) test_hle_dram_wrap$(EXE_EXT) test_pif_write$(EXE_EXT) \
 	test_re2_fill$(EXE_EXT) test_temporal_upscaler$(EXE_EXT) test_pipeline_records$(EXE_EXT) \
-	test_command_ring$(EXE_EXT)
+	test_command_ring$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT)
 
 ifeq ($(HAVE_PARALLEL_RSP), 1)
 PRSP_TEST_OBJS := $(filter $(RSPDIR_PARALLEL)/%,$(OBJECTS))
@@ -1517,7 +1604,7 @@ endif
 check-core: $(CORE_CHECKS)
 	@set -e; for t in $(CORE_CHECKS); do echo "== $$t"; ./$$t; done
 
-.PHONY: clean clean-tools tools check-angrylion check-core
+.PHONY: clean clean-tools tools check-angrylion check-core check-dynarec-block check-savestate-latch check-cpu-fallback
 -include $(OBJECTS:.o=.d)
 
 # A header named by an existing .d file but since deleted is not an error:
