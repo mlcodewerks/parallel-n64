@@ -672,10 +672,11 @@ TxtrCacheEntry * CTextureManager::GetTexture(TxtrInfo * pgti, bool fromTMEM, boo
        TextureFmt dwType = pEntry->pTexture->GetSurfaceFormat();
 
        if (pEntry->pEnhancedTexture)
-          free(pEntry->pEnhancedTexture);
+          delete pEntry->pEnhancedTexture;
        pEntry->pEnhancedTexture  = NULL;
        pEntry->dwEnhancementFlag = TEXTURE_NO_ENHANCEMENT;
 
+       pEntry->pTexture->HoldUpload(true);
        if (dwType != TEXTURE_FMT_UNKNOWN)
        {
           if( loadFromTextureBuffer )
@@ -703,7 +704,7 @@ TxtrCacheEntry * CTextureManager::GetTexture(TxtrInfo * pgti, bool fromTMEM, boo
              pEntry->FrameLastUpdated = status.gDlistCount;
 
              if (pEntry->pEnhancedTexture)
-                free(pEntry->pEnhancedTexture);
+                delete pEntry->pEnhancedTexture;
              pEntry->pEnhancedTexture  = NULL;
              pEntry->dwEnhancementFlag = TEXTURE_NO_ENHANCEMENT;
           }
@@ -717,6 +718,7 @@ TxtrCacheEntry * CTextureManager::GetTexture(TxtrInfo * pgti, bool fromTMEM, boo
           ExpandTextureS(pEntry);
           ExpandTextureT(pEntry);
        }
+       pEntry->pTexture->HoldUpload(false);
 
 #ifdef DEBUGGER
        if( pauseAtNext && eventToPause == NEXT_NEW_TEXTURE )

@@ -13,7 +13,6 @@
 #include "pipeline_record_list.h"
 
 using namespace Vulkan;
-using namespace std;
 
 extern retro_log_printf_t log_cb;
 extern retro_environment_t environ_cb;
@@ -38,10 +37,10 @@ static const uint8_t *hle_cmd_buf = nullptr;
 static uint32_t hle_cmd_base = 0;
 static uint32_t hle_cmd_len = 0;
 
-static unique_ptr<Util::TimelineTraceFile> timeline_trace_file;
-static unique_ptr<CommandProcessor> frontend;
-static unique_ptr<Device> device;
-static unique_ptr<Context> context;
+static Util::TimelineTraceFile *timeline_trace_file;
+static CommandProcessor *frontend;
+static Device *device;
+static Context *context;
 static QueryPoolHandle begin_ts, end_ts;
 
 /* Set true only when init() fully succeeds (including the device meeting
@@ -52,22 +51,44 @@ static QueryPoolHandle begin_ts, end_ts;
  * of dereferencing a half-initialized Vulkan device and crashing. */
 static bool device_supported = false;
 
-static vector<retro_vulkan_image> retro_images;
-static vector<ImageHandle> retro_image_handles;
+/* Per sync index; the frontend's index mask is 32 bits */
+#define RDP_MAX_SYNC_FRAMES 32
+static retro_vulkan_image retro_images[RDP_MAX_SYNC_FRAMES];
+static ImageHandle retro_image_handles[RDP_MAX_SYNC_FRAMES];
+static unsigned num_retro_images;
 
 /* RDRAM as the command processor imports it */
 static uintptr_t rdram_base;
 static uintptr_t rdram_offset;
-/* The upscaling factor the command processor renders at */
+/* The upscaling factor the command processor renders at, and the one it
+ * was made for (the device may not fit that) */
 static unsigned processor_factor = 1;
+static unsigned processor_requested = 1;
 
 /* The frontend's temporal upscaler (RETRO_ENVIRONMENT_GET_HW_RENDER_UPSCALER_INTERFACE) */
 static const struct retro_hw_render_upscaler_interface *upscaler_iface;
 static struct retro_hw_upscaler_request upscaler_request;
 static struct retro_hw_upscaler_inputs upscaler_inputs;
 /* Per sync index: motion vectors, depth, then the translucency mask */
-static vector<ImageHandle> upscaler_handles;
+static ImageHandle upscaler_handles[3 * RDP_MAX_SYNC_FRAMES];
 static bool upscaler_on;
+
+/* The frames released past n, as a shrinking vector did. */
+static void set_num_sync_frames(unsigned n)
+{
+	unsigned i;
+	if (n > RDP_MAX_SYNC_FRAMES)
+		n = RDP_MAX_SYNC_FRAMES;
+	for (i = n; i < RDP_MAX_SYNC_FRAMES; i++)
+	{
+		memset(&retro_images[i], 0, sizeof(retro_images[i]));
+		retro_image_handles[i].reset();
+		upscaler_handles[3 * i].reset();
+		upscaler_handles[3 * i + 1].reset();
+		upscaler_handles[3 * i + 2].reset();
+	}
+	num_retro_images = n;
+}
 static bool upscaler_reset_pending = true;
 /* The size of the framebuffer last shown, in native pixels, and the
  * size the factor was chosen for */
@@ -283,14 +304,7 @@ void begin_frame()
 		if (mask & (1u << i))
 			num_frames = i + 1;
 
-	if (num_frames != retro_images.size())
-	{
-		retro_images.resize(num_frames);
-		retro_image_handles.resize(num_frames);
-	}
-
-	if (upscaler_handles.size() != 3 * num_frames)
-		upscaler_handles.resize(3 * num_frames);
+	set_num_sync_frames(num_frames);
 
 	vulkan->wait_sync_index(vulkan->handle);
 	if (!begin_ts)
@@ -417,27 +431,55 @@ static bool create_processor(unsigned factor)
 	if (factor > 1 && super_sampled_read_back && !upscaler_on)
 	{
 		flags |= COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
-		log_cb(RETRO_LOG_INFO, "Using super-sampled read-back!\n");
 		if (super_sampled_dither)
 			flags |= COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
 	}
 
 	/* (the old one goes first: both at once may not fit) */
-	frontend.reset();
-	frontend.reset(new CommandProcessor(*device, reinterpret_cast<void *>(rdram_base),
-				rdram_offset, 8 * 1024 * 1024, 4 * 1024 * 1024, flags));
+	delete frontend;
+	frontend = new CommandProcessor(*device, reinterpret_cast<void *>(rdram_base),
+				rdram_offset, 8 * 1024 * 1024, 4 * 1024 * 1024, flags);
 
 	if (!frontend->device_is_supported())
 	{
 		log_cb(RETRO_LOG_ERROR, "This device probably does not support 16-bit storage. Make sure you're using up-to-date drivers!\n");
-		frontend.reset();
+		delete frontend;
+		frontend = nullptr;
 		return false;
 	}
 
 	quirks.set_native_texture_lod(native_texture_lod);
 	quirks.set_native_resolution_tex_rect(native_tex_rect);
 	frontend->set_quirks(quirks);
-	processor_factor = factor;
+	processor_requested = factor;
+	processor_factor = frontend->get_scaling_factor();
+	{
+		/* What the device's storage buffer bindings did not fit, said on
+		 * screen too: the options still show what was chosen */
+		bool ssaa_asked = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT) != 0;
+		bool ssaa = frontend->get_super_sampled_readback();
+		char text[160];
+		text[0] = '\0';
+		if (processor_factor != factor)
+			snprintf(text, sizeof(text),
+					"Upscaling: %ux needs larger storage buffers than this GPU allows, rendering at %ux%s.",
+					factor, processor_factor,
+					ssaa_asked && !ssaa ? " without super-sampled read-back" : "");
+		else if (ssaa_asked && !ssaa)
+			snprintf(text, sizeof(text),
+					"Super-sampled read-back is off: at %ux it needs a larger storage buffer than this GPU allows.",
+					processor_factor);
+		if (text[0])
+		{
+			struct retro_message msg;
+			msg.msg = text;
+			msg.frames = 360;
+			log_cb(RETRO_LOG_WARN, "%s\n", text);
+			environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+		}
+		else if (ssaa)
+			log_cb(RETRO_LOG_INFO, "Using super-sampled read-back!\n");
+	}
 	return true;
 }
 
@@ -530,7 +572,7 @@ static void upscaler_poll()
 	}
 
 	/* (super-sampled read-back is off while the upscaler is on) */
-	remake = factor != processor_factor
+	remake = factor != processor_requested
 		|| (on != upscaler_on && super_sampled_read_back && factor > 1);
 	if (on != upscaler_on)
 		upscaler_reset_pending = true;
@@ -618,18 +660,15 @@ bool init()
 		}
 	}
 
-	retro_images.resize(num_frames);
-	retro_image_handles.resize(num_frames);
-	upscaler_handles.resize(3 * num_frames);
+	set_num_sync_frames(num_frames);
 
-	device.reset(new Device);
+	delete device;
+	device = new Device;
 	device->set_context(*context);
 	pipeline_files_load();
 	device->init_frame_contexts(num_sync_frames);
 	log_cb(RETRO_LOG_INFO, "Using %u sync frames for parallel-RDP.\n", num_sync_frames);
-	device->set_queue_lock(
-			[]() { vulkan->lock_queue(vulkan->handle); },
-			[]() { vulkan->unlock_queue(vulkan->handle); });
+	device->set_queue_lock(vulkan->lock_queue, vulkan->unlock_queue, vulkan->handle);
 
 	uintptr_t aligned_rdram = reinterpret_cast<uintptr_t>(gfx_info.RDRAM);
 	uintptr_t offset = 0;
@@ -666,17 +705,19 @@ void deinit()
 	device_supported = false;
 	begin_ts.reset();
 	end_ts.reset();
-	retro_image_handles.clear();
-	retro_images.clear();
-	upscaler_handles.clear();
+	set_num_sync_frames(0);
 	upscaler_iface = nullptr;
 	upscaler_on = false;
-	frontend.reset();
+	delete frontend;
+	frontend = nullptr;
 	if (device)
 		pipeline_files_save();
-	device.reset();
-	context.reset();
-	timeline_trace_file.reset();
+	delete device;
+	device = nullptr;
+	delete context;
+	context = nullptr;
+	delete timeline_trace_file;
+	timeline_trace_file = nullptr;
 }
 
 static void complete_frame_error()
@@ -705,7 +746,7 @@ static void complete_frame_error()
 	auto image = device->create_image(info, &data);
 
 	unsigned index = vulkan->get_sync_index(vulkan->handle);
-	assert(index < retro_images.size());
+	assert(index < num_retro_images);
 
 	retro_images[index].image_view = image->get_view().get_view();
 	retro_images[index].image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -814,7 +855,7 @@ void complete_frame()
 		frontend->run_on_command_thread(make_blank_image, &image);
 	}
 
-	assert(index < retro_images.size());
+	assert(index < num_retro_images);
 
 	retro_images[index].image_view = image->get_view().get_view();
 	retro_images[index].image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -903,14 +944,16 @@ static bool create_device(struct retro_vulkan_context *frontend_context, VkInsta
 	if (!Vulkan::Context::init_loader(get_instance_proc_addr))
 		return false;
 
-	::RDP::context.reset(new Vulkan::Context);
+	delete ::RDP::context;
+	::RDP::context = new Vulkan::Context;
 
 	::Vulkan::Context::SystemHandles handles;
 
 	if (const char *env = getenv("PARALLEL_RDP_TIMELINE_TRACE"))
 	{
-		::RDP::timeline_trace_file.reset(new Util::TimelineTraceFile(env));
-		handles.timeline_trace_file = ::RDP::timeline_trace_file.get();
+		delete ::RDP::timeline_trace_file;
+		::RDP::timeline_trace_file = new Util::TimelineTraceFile(env);
+		handles.timeline_trace_file = ::RDP::timeline_trace_file;
 	}
 
 	::RDP::context->set_system_handles(handles);
@@ -918,11 +961,12 @@ static bool create_device(struct retro_vulkan_context *frontend_context, VkInsta
 
 	bool ok = ::RDP::context->init_device_from_instance(
 			instance, gpu, surface, required_device_extensions, num_required_device_extensions,
-			required_features, Vulkan::CONTEXT_CREATION_DISABLE_BINDLESS_BIT);
+			required_features, 0);
 	::RDP::context->set_device_factory(nullptr);
 	if (!ok)
 	{
-		::RDP::context.reset();
+		delete ::RDP::context;
+		::RDP::context = nullptr;
 		return false;
 	}
 

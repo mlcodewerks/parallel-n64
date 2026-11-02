@@ -112,7 +112,9 @@ libretro-build-linux-x64:
 # MusyX checks and parallel-RDP's temporal upscaler geometry (make
 # check-core), and a 64DD disk booted through the core
 # with no IPL ROM (make check-dd-ipl), and a savestate saved and loaded
-# back with each CPU core (make check-savestate-latch).
+# back with each CPU core (make check-savestate-latch), and cached code
+# across a state loaded back in session and under run-ahead
+# (make check-savestate-code).
 test-angrylion-linux-x64:
   extends:
     - .core-defs
@@ -128,6 +130,7 @@ test-angrylion-linux-x64:
     - make platform=unix check-core
     - make platform=unix check-dd-ipl
     - make platform=unix check-savestate-latch
+    - make platform=unix check-savestate-code
 
 # Linux 64-bit: parallel-rdp on Mesa's software Vulkan driver (lavapipe),
 # no GPU. tools/lrhost_vk runs krom's RDP tests through the core and every
@@ -135,7 +138,10 @@ test-angrylion-linux-x64:
 # threaded and single-threaded command processing, for Vulkan negotiation
 # v2 (through the frontend's device wrapper) and v1, with the shader
 # variants for devices without 8-bit SSBO storage, at 2x, and for a
-# frontend temporal upscaler (jitter, motion vectors, depth). The shader
+# frontend temporal upscaler (jitter, motion vectors, depth); upscaled and
+# downscaled frames must be the upscaled ones halved as a blit halves them,
+# every byte; and with 128 MiB storage buffer bindings each upscaling
+# setting must render at the factor that fits. The shader
 # bank check needs no GPU: those variants must not use 8-bit storage; nor
 # does the upscaler shaders' check: the SPIR-V committed must be current.
 test-parallel-rdp-linux-x64:
@@ -153,16 +159,82 @@ test-parallel-rdp-linux-x64:
   # (Mesa 21) and its Python has no CA store. A current Ubuntu has both.
   image: ubuntu:24.04
   script:
-    - apt-get update -qq && apt-get install -y -qq build-essential nasm git ca-certificates curl python3 mesa-vulkan-drivers libvulkan1 libgl-dev spirv-tools
+    - apt-get update -qq && apt-get install -y -qq build-essential nasm git ca-certificates curl python3 mesa-vulkan-drivers libvulkan1 libgl-dev spirv-tools vulkan-validationlayers
     - make -j$(nproc) platform=unix WITH_DYNAREC=$WITH_DYNAREC HAVE_THR_AL=$HAVE_THR_AL HAVE_PARALLEL=$HAVE_PARALLEL HAVE_PARALLEL_RSP=$HAVE_PARALLEL_RSP
     - make platform=unix HAVE_PARALLEL=$HAVE_PARALLEL lrhost_vk
     - python3 tools/rdp_no_storage_8bit_bank.py --check
     - python3 tools/gen_upscaler_shaders.py --check
     - python3 tools/ci/parallel_rdp_regress.py --core ./parallel_n64_libretro.so --host ./lrhost_vk --out parallel-rdp-artifacts
+    - python3 tools/ci/parallel_rdp_syncval.py --core ./parallel_n64_libretro.so --host ./lrhost_vk
+    - python3 tools/ci/parallel_rdp_downscale.py --core ./parallel_n64_libretro.so --host ./lrhost_vk
+    - python3 tools/ci/parallel_rdp_binding_fit.py --core ./parallel_n64_libretro.so --host ./lrhost_vk
   artifacts:
     when: on_failure
     paths:
       - parallel-rdp-artifacts
+
+# Linux 64-bit: parallel-rdp and the parallel RSP under ThreadSanitizer, on
+# lavapipe, natively and at 2x; races inside lavapipe and LLVM are
+# suppressed (tools/ci/tsan_lavapipe.supp), none in the core are. The
+# renderer once read pages back from host RDRAM ordered only by a fence,
+# which thread sanitizers cannot see.
+test-parallel-rdp-tsan-linux-x64:
+  extends:
+    - .core-defs
+    - .libretro-linux-x64-make-default
+  variables:
+    WITH_DYNAREC: x86_64
+    HAVE_THR_AL: 1
+    HAVE_PARALLEL: 1
+    HAVE_PARALLEL_RSP: 1
+    VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+    DEBIAN_FRONTEND: noninteractive
+  image: ubuntu:24.04
+  script:
+    - apt-get update -qq && apt-get install -y -qq build-essential nasm git ca-certificates curl python3 mesa-vulkan-drivers libvulkan1 libgl-dev
+    - make -j$(nproc) platform=unix WITH_DYNAREC=$WITH_DYNAREC HAVE_THR_AL=$HAVE_THR_AL HAVE_PARALLEL=$HAVE_PARALLEL HAVE_PARALLEL_RSP=$HAVE_PARALLEL_RSP SANITIZER=thread
+    - make platform=unix HAVE_PARALLEL=$HAVE_PARALLEL SANITIZER=thread lrhost_vk
+    - python3 -c "import sys; sys.path.insert(0, 'tools/ci'); from parallel_rdp_regress import fetch; fetch('krom-roms', 'cube16')"
+    - for scale in 1x 2x; do TSAN_OPTIONS="halt_on_error=1 suppressions=tools/ci/tsan_lavapipe.supp" ./lrhost_vk ./parallel_n64_libretro.so krom-roms/cube16.n64 10 parallel-n64-gfxplugin=parallel parallel-n64-rspplugin=parallel parallel-n64-cpucore=cached_interpreter parallel-n64-upscaling=$scale || exit 1; done
+
+# Linux 64-bit: the OpenGL renderers on Mesa's llvmpipe through headless
+# EGL, no GPU. tools/lrhost_gl runs krom's RDP tests through Glide64,
+# GLideN64, Rice and glN64: each must run to the end and draw, and
+# GLideN64 must draw the same frames whatever its colour buffer copy to
+# RDRAM is set to. check_vtables.py fails on a class that declares a
+# virtual function nobody defines (GCC 16's MinGW link failed on two such
+# Rice classes). test_glitch64_lfb_write holds Glide64's LFB write to
+# the image it was given, and test_glitch64_textures(_gles) its texture
+# uploads, on GL and on GLES 2, to what each Glide format means. tools/lrhost runs them through angrylion with and
+# without a lent software framebuffer, for each VI output: the pictures
+# must match, and the modes that can draw into the lent buffer must. Then
+# both again with the core and hosts built with AddressSanitizer and
+# UndefinedBehaviorSanitizer: any report fails the lane.
+test-gl-renderers-linux-x64:
+  extends:
+    - .core-defs
+    - .libretro-linux-x64-make-default
+  variables:
+    WITH_DYNAREC: x86_64
+    HAVE_THR_AL: 1
+    HAVE_PARALLEL: 1
+    HAVE_PARALLEL_RSP: 1
+    DEBIAN_FRONTEND: noninteractive
+  image: ubuntu:24.04
+  script:
+    - apt-get update -qq && apt-get install -y -qq build-essential nasm git ca-certificates curl python3 libgl-dev libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri
+    - make -j$(nproc) platform=unix WITH_DYNAREC=$WITH_DYNAREC HAVE_THR_AL=$HAVE_THR_AL HAVE_PARALLEL=$HAVE_PARALLEL HAVE_PARALLEL_RSP=$HAVE_PARALLEL_RSP
+    - python3 tools/ci/check_vtables.py
+    - make platform=unix lrhost_gl lrhost test_glitch64_lfb_write test_glitch64_textures test_glitch64_textures_gles
+    - for t in test_glitch64_lfb_write test_glitch64_textures test_glitch64_textures_gles; do EGL_PLATFORM=surfaceless ./$t || exit 1; done
+    - python3 tools/ci/gl_renderers.py --core ./parallel_n64_libretro.so --host ./lrhost_gl
+    - python3 tools/ci/angrylion_lend.py --core ./parallel_n64_libretro.so --host ./lrhost
+    - make platform=unix clean
+    - make -j$(nproc) platform=unix WITH_DYNAREC=$WITH_DYNAREC HAVE_THR_AL=$HAVE_THR_AL HAVE_PARALLEL=$HAVE_PARALLEL HAVE_PARALLEL_RSP=$HAVE_PARALLEL_RSP SANITIZER=address,undefined
+    - make platform=unix SANITIZER=address,undefined lrhost_gl lrhost test_glitch64_lfb_write test_glitch64_textures test_glitch64_textures_gles
+    - for t in test_glitch64_lfb_write test_glitch64_textures test_glitch64_textures_gles; do EGL_PLATFORM=surfaceless ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./$t || exit 1; done
+    - ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 tools/ci/gl_renderers.py --core ./parallel_n64_libretro.so --host ./lrhost_gl
+    - ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 python3 tools/ci/angrylion_lend.py --core ./parallel_n64_libretro.so --host ./lrhost
 
 # Linux 64-bit (ARM64)
 libretro-build-linux-aarch64:

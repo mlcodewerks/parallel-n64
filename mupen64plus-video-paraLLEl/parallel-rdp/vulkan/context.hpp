@@ -25,12 +25,6 @@
 #include "vulkan_headers.hpp"
 #include "logging.hpp"
 #include "vulkan_common.hpp"
-#include <memory>
-#include <functional>
-
-#ifdef GRANITE_VULKAN_FOSSILIZE
-#include "cli/fossilize_feature_filter.hpp"
-#endif
 
 namespace Util
 {
@@ -49,11 +43,11 @@ struct DeviceFeatures
 {
 	bool supports_debug_utils = false;
 	bool supports_mirror_clamp_to_edge = false;
+	bool supports_push_descriptor = false;
 	bool supports_nv_device_diagnostic_checkpoints = false;
 	bool supports_external_memory_host = false;
 	bool supports_surface_capabilities2 = false;
 	bool supports_full_screen_exclusive = false;
-	bool supports_descriptor_indexing = false;
 	bool supports_conservative_rasterization = false;
 	bool supports_draw_indirect_count = false;
 	bool supports_driver_properties = false;
@@ -93,6 +87,7 @@ struct DeviceFeatures
 	VkPhysicalDeviceFloat16Int8FeaturesKHR float16_int8_features = {};
 	VkPhysicalDeviceFloatControlsPropertiesKHR float_control_properties = {};
 	VkPhysicalDeviceIDProperties id_properties = {};
+	VkPhysicalDevicePushDescriptorPropertiesKHR push_descriptor_properties = {};
 
 	// EXT
 	VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_memory_properties = {};
@@ -102,8 +97,6 @@ struct DeviceFeatures
 	VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT demote_to_helper_invocation_features = {};
 	VkPhysicalDeviceScalarBlockLayoutFeaturesEXT scalar_block_features = {};
 	VkPhysicalDeviceUniformBufferStandardLayoutFeaturesKHR ubo_std430_features = {};
-	VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptor_indexing_features = {};
-	VkPhysicalDeviceDescriptorIndexingPropertiesEXT descriptor_indexing_properties = {};
 	VkPhysicalDeviceConservativeRasterizationPropertiesEXT conservative_rasterization_properties = {};
 	VkPhysicalDeviceMemoryPriorityFeaturesEXT memory_priority_features = {};
 	VkPhysicalDeviceASTCDecodeFeaturesEXT astc_decode_features = {};
@@ -125,7 +118,6 @@ enum VendorID
 
 enum ContextCreationFlagBits
 {
-	CONTEXT_CREATION_DISABLE_BINDLESS_BIT = 1 << 0,
 	CONTEXT_CREATION_ENABLE_ADVANCED_WSI_BIT = 1 << 1
 };
 using ContextCreationFlags = uint32_t;
@@ -147,26 +139,18 @@ struct DeviceFactory
 };
 
 class Context
-	: public Util::IntrusivePtrEnabled<Context, std::default_delete<Context>, HandleCounter>
-#ifdef GRANITE_VULKAN_FOSSILIZE
-	, public Fossilize::DeviceQueryInterface
-#endif
+	: public Util::IntrusivePtrEnabled<Context, Util::DefaultDelete<Context>, HandleCounter>
 {
 public:
 	// Call before initializing instances. Pointer must remain valid until instance and device creation completes.
 	// API_VERSION must be at least 1.1.
 	// By default, a Vulkan 1.1 instance is created.
-	void set_application_info(const VkApplicationInfo *app_info);
 
 	// Call before init_device_from_instance(). Must outlive device creation.
 	void set_device_factory(DeviceFactory *factory)
 	{
 		device_factory = factory;
 	}
-
-	bool init_instance_and_device(const char **instance_ext, uint32_t instance_ext_count, const char **device_ext, uint32_t device_ext_count,
-	                              ContextCreationFlags flags = 0);
-	bool init_from_instance_and_device(VkInstance instance, VkPhysicalDevice gpu, VkDevice device, VkQueue queue, uint32_t queue_family);
 	bool init_device_from_instance(VkInstance instance, VkPhysicalDevice gpu, VkSurfaceKHR surface, const char **required_device_extensions,
 	                               unsigned num_required_device_extensions, const VkPhysicalDeviceFeatures *required_features,
 	                               ContextCreationFlags flags = 0);
@@ -227,7 +211,7 @@ public:
 	const VkApplicationInfo &get_application_info() const;
 
 	void notify_validation_error(const char *msg);
-	void set_notification_callback(std::function<void (const char *)> func);
+	typedef void (*NotificationCallback)(void *userdata, const char *msg);
 
 	void set_num_thread_indices(unsigned indices)
 	{
@@ -261,13 +245,6 @@ public:
 		return handles;
 	}
 
-#ifdef GRANITE_VULKAN_FOSSILIZE
-	const Fossilize::FeatureFilter &get_feature_filter() const
-	{
-		return feature_filter;
-	}
-#endif
-
 private:
 	VkDevice device = VK_NULL_HANDLE;
 	VkInstance instance = VK_NULL_HANDLE;
@@ -296,16 +273,11 @@ private:
 	VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
 	bool force_no_validation = false;
 #endif
-	std::function<void (const char *)> message_callback;
+	NotificationCallback message_callback = nullptr;
+	void *message_userdata = nullptr;
 
 	void destroy();
-	void check_descriptor_indexing_features();
 
-#ifdef GRANITE_VULKAN_FOSSILIZE
-	Fossilize::FeatureFilter feature_filter;
-	bool format_is_supported(VkFormat format, VkFormatFeatureFlags features) override;
-	bool descriptor_set_layout_is_supported(const VkDescriptorSetLayoutCreateInfo *set_layout) override;
-#endif
 };
 
 using ContextHandle = Util::IntrusivePtr<Context>;

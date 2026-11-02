@@ -33,35 +33,20 @@
 #include "sampler.hpp"
 #include "semaphore.hpp"
 #include "semaphore_manager.hpp"
-#include "event_manager.hpp"
 #include "shader.hpp"
 #include "context.hpp"
 #include "query_pool.hpp"
 #include "buffer_pool.hpp"
-#include <memory>
-#include <vector>
-#include <functional>
-#include <unordered_map>
+#include "small_vector.hpp"
 #include <stdio.h>
 
-#ifdef GRANITE_VULKAN_FILESYSTEM
-#include "shader_manager.hpp"
-#include "texture_manager.hpp"
-#endif
-
 #ifdef GRANITE_VULKAN_MT
-#include <atomic>
 #include <rthreads/retro_eventcount.h>
 #include <queues/mpsc_stack.h>
 #include <retro_atomic.h>
 #endif
 
-#ifdef GRANITE_VULKAN_FOSSILIZE
-#include "fossilize.hpp"
-#endif
-
 #include "quirks.hpp"
-#include "small_vector.hpp"
 
 namespace Util
 {
@@ -95,7 +80,7 @@ struct DeferredRelease : mpsc_stack_node_t
 	enum class Kind
 	{
 		Framebuffer, Sampler, Pipeline, ImageView, BufferView, Image, Buffer,
-		DescriptorPool, Semaphore, RecycleSemaphore, Event, Fence, Memory, KeepAliveImage
+		DescriptorPool, Semaphore, RecycleSemaphore, Fence, Memory, KeepAliveImage
 	};
 	Kind kind;
 	uint64_t handle = 0; // any non-dispatchable Vulkan handle
@@ -107,7 +92,7 @@ struct DeferredRelease : mpsc_stack_node_t
 // owner; recorded by the owner when the frame it was sent to begins.
 struct DeferredInterval : mpsc_stack_node_t
 {
-	std::string tid, tag, extra;
+	char tid[32], tag[64];
 	QueryPoolHandle start_ts, end_ts;
 };
 
@@ -121,10 +106,8 @@ struct HandlePool
 	VulkanObjectPool<Sampler> samplers;
 	VulkanObjectPool<FenceHolder> fences;
 	VulkanObjectPool<SemaphoreHolder> semaphores;
-	VulkanObjectPool<EventHolder> events;
 	VulkanObjectPool<QueryPoolResult> query;
 	VulkanObjectPool<CommandBuffer> command_buffers;
-	VulkanObjectPool<BindlessDescriptorPool> bindless_descriptor_pool;
 	VulkanObjectPool<DeviceAllocationOwner> allocations;
 	VulkanObjectPool<DeferredRelease> deferred;
 	VulkanObjectPool<DeferredInterval> deferred_intervals;
@@ -139,7 +122,7 @@ public:
 		int32_t s32;
 		float f32;
 	};
-	virtual void message(const std::string &tag, uint32_t code, uint32_t x, uint32_t y, uint32_t z,
+	virtual void message(const char *tag, uint32_t code, uint32_t x, uint32_t y, uint32_t z,
 	                     uint32_t word_count, const Word *words) = 0;
 };
 
@@ -189,18 +172,13 @@ private:
 }
 
 class Device
-	: public Util::IntrusivePtrEnabled<Device, std::default_delete<Device>, HandleCounter>
-#ifdef GRANITE_VULKAN_FOSSILIZE
-	, public Fossilize::StateCreatorInterface
-#endif
+	: public Util::IntrusivePtrEnabled<Device, Util::DefaultDelete<Device>, HandleCounter>
 {
 public:
 	// Device-based objects which need to poke at internal data structures when their lifetimes end.
 	// Don't want to expose a lot of internal guts to make this work.
 	friend class QueryPool;
 	friend struct QueryPoolResultDeleter;
-	friend class EventHolder;
-	friend struct EventHolderDeleter;
 	friend class SemaphoreHolder;
 	friend struct SemaphoreHolderDeleter;
 	friend class FenceHolder;
@@ -219,8 +197,6 @@ public:
 	friend struct LinearHostImageDeleter;
 	friend class CommandBuffer;
 	friend struct CommandBufferDeleter;
-	friend class BindlessDescriptorPool;
-	friend struct BindlessDescriptorPoolDeleter;
 	friend class Program;
 	friend class WSI;
 	friend class Cookie;
@@ -244,29 +220,15 @@ public:
 
 	// Only called by main thread, during setup phase.
 	void set_context(const Context &context);
-	void init_swapchain(const std::vector<VkImage> &swapchain_images, unsigned width, unsigned height, VkFormat format,
-	                    VkSurfaceTransformFlagBitsKHR transform, VkImageUsageFlags usage);
-	void set_swapchain_queue_family_support(uint32_t queue_family_support);
 	bool can_touch_swapchain_in_command_buffer(CommandBuffer::Type type) const;
-	void init_external_swapchain(const std::vector<ImageHandle> &swapchain_images);
 	void init_frame_contexts(unsigned count);
 	const VolkDeviceTable &get_device_table() const;
 
 	// Profiling
-	bool init_performance_counters(CommandBuffer::Type type, const std::vector<std::string> &names);
-	bool acquire_profiling();
-	void release_profiling();
-	void query_available_performance_counters(CommandBuffer::Type type,
-	                                          uint32_t *count,
-	                                          const VkPerformanceCounterKHR **counters,
-	                                          const VkPerformanceCounterDescriptionKHR **desc);
 
 	ImageView &get_swapchain_view();
 	ImageView &get_swapchain_view(unsigned index);
-	unsigned get_num_swapchain_images() const;
 	unsigned get_num_frame_contexts() const;
-	unsigned get_swapchain_index() const;
-	unsigned get_current_frame_context() const;
 
 	size_t get_pipeline_cache_size();
 	bool get_pipeline_cache_data(uint8_t *data, size_t size);
@@ -290,7 +252,6 @@ public:
 	// Frame-pushing interface.
 	void next_frame_context();
 	void wait_idle();
-	void end_frame_context();
 
 	// RenderDoc integration API for app-guided captures.
 
@@ -304,25 +265,21 @@ public:
 	CommandBufferHandle request_command_buffer(CommandBuffer::Type type = CommandBuffer::Type::Generic);
 	CommandBufferHandle request_command_buffer_for_thread(unsigned thread_index, CommandBuffer::Type type = CommandBuffer::Type::Generic);
 
-	CommandBufferHandle request_profiled_command_buffer(CommandBuffer::Type type = CommandBuffer::Type::Generic);
-	CommandBufferHandle request_profiled_command_buffer_for_thread(unsigned thread_index, CommandBuffer::Type type = CommandBuffer::Type::Generic);
-
 	void submit(CommandBufferHandle &cmd, Fence *fence = nullptr,
 	            unsigned semaphore_count = 0, Semaphore *semaphore = nullptr);
 	void submit_empty(CommandBuffer::Type type,
 	                  Fence *fence = nullptr,
 	                  SemaphoreHolder *semaphore = nullptr);
-	void submit_discard(CommandBufferHandle &cmd);
 	void add_wait_semaphore(CommandBuffer::Type type, Semaphore semaphore, VkPipelineStageFlags stages, bool flush);
 	QueueIndices get_physical_queue_type(CommandBuffer::Type queue_type) const;
-	void register_time_interval(std::string tid, QueryPoolHandle start_ts, QueryPoolHandle end_ts,
-	                            std::string tag, std::string extra = {});
+	// Strings are copied; extra is not recorded by the timeline trace.
+	void register_time_interval(const char *tid, QueryPoolHandle start_ts, QueryPoolHandle end_ts,
+	                            const char *tag, const char *extra = nullptr);
 
 	// Request shaders and programs. These objects are owned by the Device.
 	Shader *request_shader(const uint32_t *code, size_t size,
 	                       const ResourceLayout *layout = nullptr,
 	                       const ImmutableSamplerBank *sampler_bank = nullptr);
-	Shader *request_shader_by_hash(Util::Hash hash);
 	Program *request_program(const uint32_t *vertex_data, size_t vertex_size, const uint32_t *fragment_data,
 	                         size_t fragment_size,
 	                         const ResourceLayout *vertex_layout = nullptr,
@@ -332,8 +289,6 @@ public:
 	                         const ImmutableSamplerBank *sampler_bank = nullptr);
 	Program *request_program(Shader *vertex, Shader *fragment);
 	Program *request_program(Shader *compute);
-
-	const ImmutableYcbcrConversion *request_immutable_ycbcr_conversion(const VkSamplerYcbcrConversionCreateInfo &info);
 	const ImmutableSampler *request_immutable_sampler(const SamplerCreateInfo &info, const ImmutableYcbcrConversion *ycbcr);
 
 	// Map and unmap buffer objects.
@@ -342,17 +297,11 @@ public:
 	void *map_host_buffer(const Buffer &buffer, MemoryAccessFlags access, VkDeviceSize offset, VkDeviceSize length);
 	void unmap_host_buffer(const Buffer &buffer, MemoryAccessFlags access, VkDeviceSize offset, VkDeviceSize length);
 
-	void *map_linear_host_image(const LinearHostImage &image, MemoryAccessFlags access);
-	void unmap_linear_host_image_and_sync(const LinearHostImage &image, MemoryAccessFlags access);
-
 	// Create buffers and images.
 	BufferHandle create_buffer(const BufferCreateInfo &info, const void *initial = nullptr);
 	BufferHandle create_imported_host_buffer(const BufferCreateInfo &info, VkExternalMemoryHandleTypeFlagBits type, void *host_buffer);
 	ImageHandle create_image(const ImageCreateInfo &info, const ImageInitialData *initial = nullptr);
 	ImageHandle create_image_from_staging_buffer(const ImageCreateInfo &info, const InitialImageBuffer *buffer);
-	LinearHostImageHandle create_linear_host_image(const LinearHostImageCreateInfo &info);
-	DeviceAllocationOwnerHandle take_device_allocation_ownership(Image &image);
-	DeviceAllocationOwnerHandle allocate_memory(const MemoryAllocateInfo &info);
 
 	// Create staging buffers for images.
 	InitialImageBuffer create_image_staging_buffer(const ImageCreateInfo &info, const ImageInitialData *initial);
@@ -361,10 +310,6 @@ public:
 	// Create image view, buffer views and samplers.
 	ImageViewHandle create_image_view(const ImageViewCreateInfo &view_info);
 	BufferViewHandle create_buffer_view(const BufferViewCreateInfo &view_info);
-	SamplerHandle create_sampler(const SamplerCreateInfo &info);
-
-	BindlessDescriptorPoolHandle create_bindless_descriptor_pool(BindlessResourceType type,
-	                                                             unsigned num_sets, unsigned num_descriptors);
 
 	// Render pass helpers.
 	bool image_format_is_supported(VkFormat format, VkFormatFeatureFlags2KHR required, VkImageTiling tiling = VK_IMAGE_TILING_OPTIMAL) const;
@@ -373,12 +318,6 @@ public:
 	                                 VkImageUsageFlags usage, VkImageCreateFlags flags,
 	                                 const void *pNext,
 	                                 VkImageFormatProperties2 *properties2) const;
-
-	VkFormat get_default_depth_stencil_format() const;
-	VkFormat get_default_depth_format() const;
-	ImageHandle get_transient_attachment(unsigned width, unsigned height, VkFormat format,
-	                                     unsigned index = 0, unsigned samples = 1, unsigned layers = 1);
-	RenderPassInfo get_swapchain_render_pass(SwapchainRenderPass style);
 
 	// Semaphore API:
 	// Semaphores in Granite are abstracted to support both binary and timeline semaphores
@@ -403,8 +342,6 @@ public:
 	// Requests a binary or timeline semaphore that can be used to import/export.
 	// These semaphores cannot be used directly by add_wait_semaphore() and submit_empty().
 	// See request_timeline_semaphore_as_binary() for how to use timelines.
-	Semaphore request_semaphore_external(VkSemaphoreTypeKHR type,
-	                                     VkExternalSemaphoreHandleTypeFlagBits handle_type);
 	// The created semaphore does not hold ownership of the VkSemaphore object.
 	Semaphore request_timeline_semaphore_as_binary(const SemaphoreHolder &holder, uint64_t value);
 
@@ -412,7 +349,6 @@ public:
 	// Move assignment can be used to move a payload.
 	// Mostly useful to deal better with render graph implementation.
 	// For time being however, we'll support moving the payload over to the proxy object.
-	Semaphore request_proxy_semaphore();
 
 	// For compat with existing code that uses this entry point.
 	inline Semaphore request_legacy_semaphore() { return request_semaphore(VK_SEMAPHORE_TYPE_BINARY_KHR); }
@@ -441,17 +377,14 @@ public:
 
 	const Sampler &get_stock_sampler(StockSampler sampler) const;
 
-#ifdef GRANITE_VULKAN_FILESYSTEM
-	ShaderManager &get_shader_manager();
-	TextureManager &get_texture_manager();
-	void init_shader_manager_cache();
-	void flush_shader_manager_cache();
-#endif
-
 	// For some platforms, the device and queue might be shared, possibly across threads, so need some mechanism to
 	// lock the global device and queue.
-	void set_queue_lock(std::function<void ()> lock_callback,
-	                    std::function<void ()> unlock_callback);
+	typedef void (*QueueLockCallback)(void *userdata);
+	void set_queue_lock(QueueLockCallback lock_callback, QueueLockCallback unlock_callback, void *userdata);
+
+	// Submits one-off initialisation of a resource the way zero-initialised
+	// buffers are: ordered before later work on every queue that may use it.
+	void submit_initialization(CommandBufferHandle &cmd, VkBufferUsageFlags usage);
 
 	const ImplementationWorkarounds &get_workarounds() const
 	{
@@ -463,14 +396,9 @@ public:
 		return ext;
 	}
 
-	bool swapchain_touched() const;
-
 	double convert_device_timestamp_delta(uint64_t start_ticks, uint64_t end_ticks) const;
 	// Writes a timestamp on host side, which is calibrated to the GPU timebase.
 	QueryPoolHandle write_calibrated_timestamp();
-
-	// A split version of VkEvent handling which lets us record a wait command before signal is recorded.
-	PipelineEvent begin_signal_event(VkPipelineStageFlags stages);
 
 	// Promotes any read-write cached state to read-only,
 	// which eliminates need to read/write lock.
@@ -480,23 +408,17 @@ public:
 	// - request_shader()
 	// - request_program()
 	// Generally, this should be called before you call next_frame_context().
-	void promote_read_write_caches_to_read_only();
 
 	const Context::SystemHandles &get_system_handles() const
 	{
 		return system_handles;
 	}
 
-	void configure_default_geometry_samplers(float max_aniso, float lod_bias);
-
 	bool supports_subgroup_size_log2(bool subgroup_full_group,
 	                                 uint8_t subgroup_minimum_size_log2,
 	                                 uint8_t subgroup_maximum_size_log2) const;
 
 	const QueueInfo &get_queue_info() const;
-
-	void timestamp_log_reset();
-	void timestamp_log(const TimestampIntervalReportCallback &cb) const;
 
 private:
 	VkInstance instance = VK_NULL_HANDLE;
@@ -507,7 +429,7 @@ private:
 	unsigned num_thread_indices = 1;
 
 #ifdef GRANITE_VULKAN_MT
-	std::atomic_uint64_t cookie;
+	Util::AtomicU64 cookie;
 #else
 	uint64_t cookie = 0;
 #endif
@@ -516,21 +438,16 @@ private:
 	void bake_program(Program &program);
 
 	void request_vertex_block(BufferBlock &block, VkDeviceSize size);
-	void request_index_block(BufferBlock &block, VkDeviceSize size);
 	void request_uniform_block(BufferBlock &block, VkDeviceSize size);
-	void request_staging_block(BufferBlock &block, VkDeviceSize size);
 
 	QueryPoolHandle write_timestamp(VkCommandBuffer cmd, VkPipelineStageFlagBits stage);
-
-	void set_acquire_semaphore(unsigned index, Semaphore acquire);
-	Semaphore consume_release_semaphore();
-	VkQueue get_current_present_queue() const;
 
 	PipelineLayout *request_pipeline_layout(const CombinedResourceLayout &layout,
 	                                        const ImmutableSamplerBank *immutable_samplers);
 	DescriptorSetAllocator *request_descriptor_set_allocator(const DescriptorSetLayout &layout,
 	                                                         const uint32_t *stages_for_sets,
-	                                                         const ImmutableSampler * const *immutable_samplers);
+	                                                         const ImmutableSampler * const *immutable_samplers,
+	                                                         bool push);
 	const Framebuffer &request_framebuffer(const RenderPassInfo &info);
 	const RenderPass &request_render_pass(const RenderPassInfo &info, bool compatible);
 
@@ -541,7 +458,6 @@ private:
 	void init_stock_samplers();
 	void init_stock_sampler(StockSampler sampler, float max_aniso, float lod_bias);
 	void init_timeline_semaphores();
-	void init_bindless();
 	void deinit_timeline_semaphores();
 
 	uint64_t update_wrapped_device_timestamp(uint64_t ts);
@@ -550,7 +466,7 @@ private:
 
 	QueryPoolHandle write_timestamp_nolock(VkCommandBuffer cmd, VkPipelineStageFlagBits stage);
 	QueryPoolHandle write_calibrated_timestamp_nolock();
-	void register_time_interval_nolock(std::string tid, QueryPoolHandle start_ts, QueryPoolHandle end_ts, std::string tag, std::string extra);
+	void register_time_interval_nolock(const char *tid, QueryPoolHandle start_ts, QueryPoolHandle end_ts, const char *tag);
 
 	// Make sure this is deleted last.
 	HandlePool handle_pool;
@@ -594,7 +510,6 @@ private:
 		DeviceAllocator memory;
 		FenceManager fence;
 		SemaphoreManager semaphore;
-		EventManager event;
 		BufferPool vbo, ibo, ubo, staging;
 		TimestampIntervalManager timestamps;
 	};
@@ -622,64 +537,62 @@ private:
 		const VolkDeviceTable &table;
 		Managers &managers;
 
-		std::vector<CommandPool> cmd_pools[QUEUE_INDEX_COUNT];
+		Util::Vector<CommandPool> cmd_pools[QUEUE_INDEX_COUNT];
 		VkSemaphore timeline_semaphores[QUEUE_INDEX_COUNT] = {};
 		uint64_t timeline_fences[QUEUE_INDEX_COUNT] = {};
 
 		QueryPool query_pool;
 
-		std::vector<BufferBlock> vbo_blocks;
-		std::vector<BufferBlock> ibo_blocks;
-		std::vector<BufferBlock> ubo_blocks;
-		std::vector<BufferBlock> staging_blocks;
+		Util::Vector<BufferBlock> vbo_blocks;
+		Util::Vector<BufferBlock> ibo_blocks;
+		Util::Vector<BufferBlock> ubo_blocks;
+		Util::Vector<BufferBlock> staging_blocks;
 
-		std::vector<VkFence> wait_fences;
-		std::vector<VkFence> recycle_fences;
+		Util::Vector<VkFence> wait_fences;
+		Util::Vector<VkFence> recycle_fences;
 
-		std::vector<DeviceAllocation> allocations;
-		std::vector<VkFramebuffer> destroyed_framebuffers;
-		std::vector<VkSampler> destroyed_samplers;
-		std::vector<VkPipeline> destroyed_pipelines;
-		std::vector<VkImageView> destroyed_image_views;
-		std::vector<VkBufferView> destroyed_buffer_views;
-		std::vector<VkImage> destroyed_images;
-		std::vector<VkBuffer> destroyed_buffers;
-		std::vector<VkDescriptorPool> destroyed_descriptor_pools;
+		Util::Vector<DeviceAllocation> allocations;
+		Util::Vector<VkFramebuffer> destroyed_framebuffers;
+		Util::Vector<VkSampler> destroyed_samplers;
+		Util::Vector<VkPipeline> destroyed_pipelines;
+		Util::Vector<VkImageView> destroyed_image_views;
+		Util::Vector<VkBufferView> destroyed_buffer_views;
+		Util::Vector<VkImage> destroyed_images;
+		Util::Vector<VkBuffer> destroyed_buffers;
+		Util::Vector<VkDescriptorPool> destroyed_descriptor_pools;
 		Util::SmallVector<CommandBufferHandle> submissions[QUEUE_INDEX_COUNT];
-		std::vector<VkSemaphore> recycled_semaphores;
-		std::vector<VkEvent> recycled_events;
-		std::vector<VkSemaphore> destroyed_semaphores;
-		std::vector<ImageHandle> keep_alive_images;
+		Util::Vector<VkSemaphore> recycled_semaphores;
+		Util::Vector<VkSemaphore> destroyed_semaphores;
+		Util::Vector<ImageHandle> keep_alive_images;
 
 		struct DebugChannel
 		{
 			DebugChannelInterface *iface;
-			std::string tag;
+			char tag[32];
 			BufferHandle buffer;
 		};
-		std::vector<DebugChannel> debug_channels;
+		Util::Vector<DebugChannel> debug_channels;
 
 		struct TimestampIntervalHandles
 		{
-			std::string tid;
+			char tid[32];
 			QueryPoolHandle start_ts;
 			QueryPoolHandle end_ts;
 			TimestampInterval *timestamp_tag;
-			std::string extra;
 		};
-		std::vector<TimestampIntervalHandles> timestamp_intervals;
+		Util::Vector<TimestampIntervalHandles> timestamp_intervals;
 
 		bool in_destructor = false;
 	};
 	// The per frame structure must be destroyed after
 	// the hashmap data structures below, so it must be declared before.
-	std::vector<std::unique_ptr<PerFrame>> per_frame;
+	Util::OwnedPtrArray<PerFrame, MAX_DEFERRED_FRAMES> per_frame;
 
 	struct
 	{
 		Semaphore acquire;
 		Semaphore release;
-		std::vector<ImageHandle> swapchain;
+		Util::Vector<ImageHandle> swapchain;
 		VkQueue present_queue = VK_NULL_HANDLE;
 		uint32_t queue_family_support_mask = 0;
 		unsigned index = 0;
@@ -708,9 +621,9 @@ private:
 	// Pending buffers which need to be copied from CPU to GPU before submitting graphics or compute work.
 	struct
 	{
-		std::vector<BufferBlock> vbo;
-		std::vector<BufferBlock> ibo;
-		std::vector<BufferBlock> ubo;
+		Util::Vector<BufferBlock> vbo;
+		Util::Vector<BufferBlock> ibo;
+		Util::Vector<BufferBlock> ubo;
 	} dma;
 
 	void submit_queue(QueueIndices physical_type, InternalFence *fence,
@@ -738,7 +651,6 @@ private:
 	uint32_t find_memory_type(BufferDomain domain, uint32_t mask) const;
 	uint32_t find_memory_type(ImageDomain domain, uint32_t mask) const;
 	uint32_t find_memory_type(uint32_t required, uint32_t mask) const;
-	bool memory_type_is_device_optimal(uint32_t type) const;
 	bool memory_type_is_host_visible(uint32_t type) const;
 
 	const ImmutableSampler *samplers[static_cast<unsigned>(StockSampler::Count)] = {};
@@ -750,9 +662,6 @@ private:
 	VulkanCache<Program> programs;
 	VulkanCache<ImmutableSampler> immutable_samplers;
 	VulkanCache<ImmutableYcbcrConversion> immutable_ycbcr_conversions;
-
-	DescriptorSetAllocator *bindless_sampled_image_allocator_fp = nullptr;
-	DescriptorSetAllocator *bindless_sampled_image_allocator_integer = nullptr;
 
 	FramebufferAllocator framebuffer_allocator;
 	TransientAttachmentAllocator transient_allocator;
@@ -767,10 +676,10 @@ private:
 	PerformanceQueryPool &get_performance_query_pool(QueueIndices physical_type);
 	void clear_wait_semaphores();
 	void submit_staging(CommandBufferHandle &cmd, VkBufferUsageFlags usage, bool flush);
-	PipelineEvent request_pipeline_event();
 
-	std::function<void ()> queue_lock_callback;
-	std::function<void ()> queue_unlock_callback;
+	QueueLockCallback queue_lock_callback = nullptr;
+	QueueLockCallback queue_unlock_callback = nullptr;
+	void *queue_lock_userdata = nullptr;
 	void flush_frame(QueueIndices physical_type);
 	void sync_buffer_blocks();
 	void submit_empty_inner(QueueIndices type, InternalFence *fence,
@@ -795,11 +704,8 @@ private:
 	void destroy_framebuffer(VkFramebuffer framebuffer);
 	void destroy_semaphore(VkSemaphore semaphore);
 	void recycle_semaphore(VkSemaphore semaphore);
-	void destroy_event(VkEvent event);
 	void free_memory(const DeviceAllocation &alloc);
 	void reset_fence(VkFence fence, bool observed_wait);
-	void keep_handle_alive(ImageHandle handle);
-	void destroy_descriptor_pool(VkDescriptorPool desc_pool);
 
 	void destroy_buffer_nolock(VkBuffer buffer);
 	void destroy_image_nolock(VkImage image);
@@ -810,9 +716,7 @@ private:
 	void destroy_framebuffer_nolock(VkFramebuffer framebuffer);
 	void destroy_semaphore_nolock(VkSemaphore semaphore);
 	void recycle_semaphore_nolock(VkSemaphore semaphore);
-	void destroy_event_nolock(VkEvent event);
 	void free_memory_nolock(const DeviceAllocation &alloc);
-	void destroy_descriptor_pool_nolock(VkDescriptorPool desc_pool);
 	void reset_fence_nolock(VkFence fence, bool observed_wait);
 
 	void flush_frame_nolock();
@@ -829,64 +733,14 @@ private:
 	void request_index_block_nolock(BufferBlock &block, VkDeviceSize size);
 	void request_uniform_block_nolock(BufferBlock &block, VkDeviceSize size);
 	void request_staging_block_nolock(BufferBlock &block, VkDeviceSize size);
-
-	CommandBufferHandle request_secondary_command_buffer_for_thread(unsigned thread_index,
-	                                                                const Framebuffer *framebuffer,
-	                                                                unsigned subpass,
-	                                                                CommandBuffer::Type type = CommandBuffer::Type::Generic);
 	void add_frame_counter_nolock();
 	void decrement_frame_counter_nolock();
 	void submit_secondary(CommandBuffer &primary, CommandBuffer &secondary);
 	void wait_idle_nolock();
 	void end_frame_nolock();
 
-	void add_debug_channel_buffer(DebugChannelInterface *iface, std::string tag, BufferHandle buffer);
+	void add_debug_channel_buffer(DebugChannelInterface *iface, const char *tag, BufferHandle buffer);
 	void parse_debug_channel(const PerFrame::DebugChannel &channel);
-
-	Fence request_legacy_fence();
-
-#ifdef GRANITE_VULKAN_FILESYSTEM
-	ShaderManager shader_manager;
-	TextureManager texture_manager;
-#endif
-
-#ifdef GRANITE_VULKAN_FOSSILIZE
-	Fossilize::StateRecorder state_recorder;
-	bool enqueue_create_sampler(Fossilize::Hash hash, const VkSamplerCreateInfo *create_info, VkSampler *sampler) override;
-	bool enqueue_create_descriptor_set_layout(Fossilize::Hash hash, const VkDescriptorSetLayoutCreateInfo *create_info, VkDescriptorSetLayout *layout) override;
-	bool enqueue_create_pipeline_layout(Fossilize::Hash hash, const VkPipelineLayoutCreateInfo *create_info, VkPipelineLayout *layout) override;
-	bool enqueue_create_shader_module(Fossilize::Hash hash, const VkShaderModuleCreateInfo *create_info, VkShaderModule *module) override;
-	bool enqueue_create_render_pass(Fossilize::Hash hash, const VkRenderPassCreateInfo *create_info, VkRenderPass *render_pass) override;
-	bool enqueue_create_render_pass2(Fossilize::Hash hash, const VkRenderPassCreateInfo2 *create_info, VkRenderPass *render_pass) override;
-	bool enqueue_create_compute_pipeline(Fossilize::Hash hash, const VkComputePipelineCreateInfo *create_info, VkPipeline *pipeline) override;
-	bool enqueue_create_graphics_pipeline(Fossilize::Hash hash, const VkGraphicsPipelineCreateInfo *create_info, VkPipeline *pipeline) override;
-	bool enqueue_create_raytracing_pipeline(Fossilize::Hash hash, const VkRayTracingPipelineCreateInfoKHR *create_info, VkPipeline *pipeline) override;
-	void notify_replayed_resources_for_type() override;
-	VkPipeline fossilize_create_graphics_pipeline(Fossilize::Hash hash, VkGraphicsPipelineCreateInfo &info);
-	VkPipeline fossilize_create_compute_pipeline(Fossilize::Hash hash, VkComputePipelineCreateInfo &info);
-
-	void register_graphics_pipeline(Fossilize::Hash hash, const VkGraphicsPipelineCreateInfo &info);
-	void register_compute_pipeline(Fossilize::Hash hash, const VkComputePipelineCreateInfo &info);
-	void register_render_pass(VkRenderPass render_pass, Fossilize::Hash hash, const VkRenderPassCreateInfo &info);
-	void register_descriptor_set_layout(VkDescriptorSetLayout layout, Fossilize::Hash hash, const VkDescriptorSetLayoutCreateInfo &info);
-	void register_pipeline_layout(VkPipelineLayout layout, Fossilize::Hash hash, const VkPipelineLayoutCreateInfo &info);
-	void register_shader_module(VkShaderModule module, Fossilize::Hash hash, const VkShaderModuleCreateInfo &info);
-	//void register_sampler(VkSampler sampler, Fossilize::Hash hash, const VkSamplerCreateInfo &info);
-
-	struct
-	{
-		std::unordered_map<VkShaderModule, Shader *> shader_map;
-		std::unordered_map<VkRenderPass, RenderPass *> render_pass_map;
-		const Fossilize::FeatureFilter *feature_filter = nullptr;
-#ifdef GRANITE_VULKAN_MT
-		// Need to forward-declare the type, avoid the ref-counted wrapper.
-		Granite::TaskGroup *pipeline_group = nullptr;
-#endif
-	} replayer_state;
-
-	void init_pipeline_state(const Fossilize::FeatureFilter &filter);
-	void flush_pipeline_state();
-#endif
 
 	ImplementationWorkarounds workarounds;
 	void init_workarounds();
@@ -918,11 +772,6 @@ struct OwnershipTransferInfo
 // If semaphore is a valid handle, it will be waited on in either old_queue to perform release barrier
 // or new_queue depending on what is required.
 // If the image uses CONCURRENT sharing mode, acquire/release barriers are skipped.
-CommandBufferHandle request_command_buffer_with_ownership_transfer(
-		Device &device,
-		const Vulkan::Image &image,
-		const OwnershipTransferInfo &info,
-		const Vulkan::Semaphore &semaphore);
 
 using DeviceHandle = Util::IntrusivePtr<Device>;
 }

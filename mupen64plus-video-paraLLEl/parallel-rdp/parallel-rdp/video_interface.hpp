@@ -26,6 +26,7 @@
 #include "device.hpp"
 #include "rdp_common.hpp"
 #include "temporal_upscaler.h"
+#include "vi_image_pool.hpp"
 
 namespace RDP
 {
@@ -117,6 +118,8 @@ public:
 	Vulkan::ImageHandle scanout(VkImageLayout target_layout, const ScanoutOptions &options = {}, unsigned scale_factor = 1);
 	void scanout_memory_range(unsigned &offset, unsigned &length) const;
 	void set_shader_bank(const ShaderBank *bank);
+	// Called after each Device::next_frame_context().
+	void begin_frame_context();
 
 	/* ScanoutOptions::upscaler's scanout, submitted on the RDP's queue
 	 * and waited for by the next graphics submission, ending in
@@ -163,6 +166,11 @@ private:
 	Vulkan::BufferHandle gamma_lut;
 	Vulkan::BufferViewHandle gamma_lut_view;
 	const ShaderBank *shader_bank = nullptr;
+	// vi_scale with the passes after it folded in
+	Vulkan::Shader *vi_scale_fold = nullptr;
+	bool fold_disabled = false;
+	// what it reads as the previous frame when there is none
+	Vulkan::ImageHandle no_previous_frame;
 
 	void init_gamma_table();
 	bool previous_frame_blank = false;
@@ -170,9 +178,28 @@ private:
 	int filter_debug_channel_x = -1;
 	int filter_debug_channel_y = -1;
 
-	void message(const std::string &tag, uint32_t code,
+	void message(const char *tag, uint32_t code,
 	             uint32_t x, uint32_t y, uint32_t z,
 	             uint32_t num_words, const Vulkan::DebugChannelInterface::Word *words) override;
+
+	// Intermediate images, reused instead of created every frame.
+	mutable VIImagePool image_pool;
+
+	// The per-line horizontal state the scale pass reads, decoded straight
+	// into a persistently mapped buffer; one is reused once its frame
+	// context comes round again, as the images are.
+	struct HorizontalBuffer
+	{
+		Vulkan::BufferHandle buffer;
+		Vulkan::BufferViewHandle view;
+		uint64_t free_serial;
+	};
+	enum { MAX_HORIZONTAL_BUFFERS = 32 };
+	HorizontalBuffer horizontal_buffers[MAX_HORIZONTAL_BUFFERS] = {};
+	HorizontalBuffer *acquire_horizontal_buffer();
+	uint64_t frame_serial = 0;
+	const VIImagePool::Entry &acquire_image(const Vulkan::ImageCreateInfo &info, bool layer_views) const;
+	const VIImagePool::Entry &create_pooled_image(const Vulkan::ImageCreateInfo &info, bool layer_views) const;
 
 	// Frame state.
 	uint32_t frame_count = 0;
@@ -204,7 +231,7 @@ private:
 		HorizontalInfo lines[VI_MAX_OUTPUT_SCANLINES];
 	};
 
-	static void bind_horizontal_info_view(Vulkan::CommandBuffer &cmd, const HorizontalInfoLines &lines);
+	static void bind_horizontal_info_view(Vulkan::CommandBuffer &cmd, const HorizontalBuffer &buffer);
 
 	struct Registers
 	{
@@ -229,6 +256,19 @@ private:
 	};
 
 	Registers decode_vi_registers(HorizontalInfoLines *lines) const;
+
+	// Horizontal bounding boxes gathered over the scanlines.
+	// Points at the caller's accumulators, as a by-reference capture
+	// would: separate scalars keep GCC from vectorizing four min/max.
+	struct HorizontalBounds
+	{
+		bool is_pal;
+		int y_start, y_add;
+		int *h_start_lo, *h_end_hi, *h_start_clamp_lo, *h_end_clamp_hi;
+		int *max_x, *min_x, *max_x_clamp;
+	};
+	static void analyze_line(const HorizontalBounds &b, int x_start, int x_add, int h_start, int h_end,
+	                         HorizontalInfo *line);
 	void clear_per_scanline_state();
 
 	Vulkan::ImageHandle vram_fetch_stage(const Registers &registers,
@@ -241,14 +281,23 @@ private:
 	                                Vulkan::Image &aa_image,
 	                                const Registers &registers,
 	                                unsigned scaling_factor) const;
+	// The passes after the scale pass that it can do itself: its 2:1
+	// downscales, and the deinterlace of a bobbed field.
+	struct ScaleFold
+	{
+		unsigned downscale_steps;
+		bool deinterlace;
+		bool field_select;
+	};
 	Vulkan::ImageHandle scale_stage(Vulkan::CommandBuffer &cmd,
 	                                const Vulkan::Image *divot_image,
 	                                Registers registers,
-	                                const HorizontalInfoLines &lines,
+	                                const HorizontalBuffer &lines,
 	                                unsigned scaling_factor,
 	                                bool degenerate,
 	                                const ScanoutOptions &options,
-	                                bool final_pass) const;
+	                                bool final_pass,
+	                                const ScaleFold *fold = nullptr) const;
 	Vulkan::ImageHandle downscale_stage(Vulkan::CommandBuffer &cmd,
 	                                    Vulkan::Image &scale_image,
 	                                    unsigned scaling_factor,

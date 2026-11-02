@@ -22,8 +22,6 @@
 
 #pragma once
 
-#include <memory>
-#include <queue>
 #include "device.hpp"
 #include "video_interface.hpp"
 #include "rdp_renderer.hpp"
@@ -64,7 +62,7 @@ struct CoherencyCopy
 	size_t mask_offset = 0;
 	size_t dst_offset = 0;
 	size_t size = 0;
-	std::atomic_uint32_t *counter_base = nullptr;
+	retro_atomic_int_t *counter_base = nullptr;
 	unsigned counters = 0;
 };
 
@@ -75,8 +73,10 @@ struct CoherencyOperation
 
 	uint8_t *dst = nullptr;
 	const Vulkan::Buffer *src = nullptr;
-	std::vector<CoherencyCopy> copies;
-	std::atomic_uint32_t *unlock_cookie = nullptr;
+	// num_copies of them, in storage of the producer's until enqueued
+	CoherencyCopy *copies = nullptr;
+	unsigned num_copies = 0;
+	retro_atomic_int_t *unlock_cookie = nullptr;
 };
 
 // These options control various behavior when upscaling to workaround glitches which arise naturally as part of upscaling.
@@ -161,6 +161,12 @@ public:
 	void end_write_hidden_rdram();
 	size_t get_rdram_size() const;
 	size_t get_hidden_rdram_size() const;
+	// What it renders at: the factor asked for, or less where the device
+	// cannot bind buffers that large.
+	unsigned get_scaling_factor() const;
+	// Whether super-sampled read-back is on: as asked, unless the device
+	// cannot bind the write mask with the factor.
+	bool get_super_sampled_readback() const;
 	void *get_tmem();
 
 	// Sets VI register
@@ -170,7 +176,6 @@ public:
 	/* After a scanout with ScanoutOptions::upscaler: that frame's motion
 	 * vectors, depth and jitter. No images when it had none. */
 	void get_upscaler_frame(UpscalerFrame &frame);
-	void scanout_sync(std::vector<RGBA> &colors, unsigned &width, unsigned &height, const ScanoutOptions &opts = {});
 	void scanout_async_buffer(VIScanoutBuffer &buffer, const ScanoutOptions &opts = {});
 
 	// Support for modifying certain registers per-scanline.
@@ -224,9 +229,12 @@ private:
 	size_t rdram_offset;
 	size_t rdram_size;
 	CommandProcessorFlags flags;
-#ifndef PARALLEL_RDP_SHADER_DIR
-	std::unique_ptr<ShaderBank> shader_bank;
-#endif
+	// Outlives the renderer below, whose pipeline worker reads it.
+	struct ShaderBankOwner
+	{
+		ShaderBank *bank = nullptr;
+		~ShaderBankOwner();
+	} shader_bank;
 
 	// Tear-down order is important here.
 	Renderer renderer;
@@ -276,6 +284,18 @@ private:
 	// size_t, compared by difference, so it may wrap on 32-bit hosts.
 	retro_atomic_size_t thread_timeline_value{0};
 
+	// The nodes of the timeline worker's work, handed back by it once done
+	// and reused by the thread that queues them: no allocation per
+	// operation once enough are about. Destroyed after the worker below.
+	struct CoherencyNodePool
+	{
+		mpsc_stack_t returned;
+		// the queuing thread's own, taken from returned
+		mpsc_stack_node_t *spare = nullptr;
+		CoherencyNodePool() { mpsc_stack_init(&returned); }
+		~CoherencyNodePool();
+	} coherency_nodes;
+
 	// The timeline worker (rdp_worker.c): waits on fences, copies GPU
 	// writes back to RDRAM and publishes timeline values. Owned so that
 	// it is freed here, at the same point the member was destroyed.
@@ -292,6 +312,7 @@ private:
 	bool measure_stall_time = false;
 	bool single_threaded_processing = false;
 	bool is_supported = false;
+	bool super_sampled_readback = false;
 	// Hidden RDRAM is 16 bits per entry (see RendererOptions::no_storage_8bit).
 	bool no_storage_8bit = false;
 	void flush_hidden_dram_to_dump();
@@ -317,7 +338,13 @@ private:
 	void upscaler_triangle(unsigned op, TriangleSetup &setup, AttributeSetup &attr);
 	void upscaler_scanout();
 
-	std::unique_ptr<RDPDumpWriter> dump_writer;
+	RDPDumpWriter *dump_writer = nullptr;
+#if defined(__GNUC__)
+	__attribute__((noinline, cold))
+#elif defined(_MSC_VER)
+	__declspec(noinline)
+#endif
+	void enqueue_command_dumped(unsigned num_words, const uint32_t *words);
 	bool dump_in_command_list = false;
 };
 }

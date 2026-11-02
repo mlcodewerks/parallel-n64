@@ -2,6 +2,12 @@
 
 PARALLEL_RDP_CFLAGS :=
 PARALLEL_RDP_CXXFLAGS := -DGRANITE_VULKAN_MT
+# retro_atomic.h picks std::atomic in C++: the builtins instead
+ifneq (,$(findstring msvc,$(platform)))
+PARALLEL_RDP_CXXFLAGS += -DRETRO_ATOMIC_FORCE_MSVC
+else
+PARALLEL_RDP_CXXFLAGS += -DRETRO_ATOMIC_FORCE_GCC_NEW
+endif
 
 PARALLEL_RDP_SOURCES_CXX := \
         $(wildcard $(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/*.cpp) \
@@ -13,12 +19,10 @@ PARALLEL_RDP_SOURCES_CXX := \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/cookie.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/descriptor_set.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/device.cpp \
-        $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/event_manager.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/fence.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/fence_manager.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/image.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/memory_allocator.cpp \
-        $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/pipeline_event.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/query_pool.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/render_pass.cpp \
         $(PARALLEL_RDP_IMPLEMENTATION)/vulkan/sampler.cpp \

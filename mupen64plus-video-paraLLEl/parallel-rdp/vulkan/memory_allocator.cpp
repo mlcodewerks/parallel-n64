@@ -22,7 +22,6 @@
 
 #include "memory_allocator.hpp"
 #include "device.hpp"
-#include <algorithm>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -33,6 +32,15 @@
 
 namespace Vulkan
 {
+static void log_heap_budget(uint32_t size, const HeapBudget &budget)
+{
+	LOGW("  Size: %u MiB.\n", unsigned(size / (1024 * 1024)));
+	LOGW("  Device usage: %u MiB.\n", unsigned(budget.device_usage / (1024 * 1024)));
+	LOGW("  Tracked usage: %u MiB.\n", unsigned(budget.tracked_usage / (1024 * 1024)));
+	LOGW("  Budget size: %u MiB.\n", unsigned(budget.budget_size / (1024 * 1024)));
+	LOGW("  Max size: %u MiB.\n", unsigned(budget.max_size / (1024 * 1024)));
+}
+
 void DeviceAllocation::free_immediate()
 {
 	if (!alloc)
@@ -43,45 +51,6 @@ void DeviceAllocation::free_immediate()
 	base = VK_NULL_HANDLE;
 	mask = 0;
 	offset = 0;
-}
-
-ExternalHandle DeviceAllocation::export_handle(Device &device)
-{
-	ExternalHandle h;
-
-	if (exportable_types == 0)
-	{
-		LOGE("Cannot export from this allocation.\n");
-		return h;
-	}
-
-	auto &table = device.get_device_table();
-
-#ifdef _WIN32
-	VkMemoryGetWin32HandleInfoKHR handle_info = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
-	handle_info.handleType = static_cast<VkExternalMemoryHandleTypeFlagBits>(exportable_types);
-	handle_info.memory = base;
-	h.memory_handle_type = handle_info.handleType;
-
-	if (table.vkGetMemoryWin32HandleKHR(device.get_device(), &handle_info, &h.handle) != VK_SUCCESS)
-	{
-		LOGE("Failed to export memory handle.\n");
-		h.handle = nullptr;
-	}
-#else
-	VkMemoryGetFdInfoKHR fd_info = { VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR };
-	fd_info.handleType = static_cast<VkExternalMemoryHandleTypeFlagBits>(exportable_types);
-	fd_info.memory = base;
-	h.memory_handle_type = fd_info.handleType;
-
-	if (table.vkGetMemoryFdKHR(device.get_device(), &fd_info, &h.handle) != VK_SUCCESS)
-	{
-		LOGE("Failed to export memory handle.\n");
-		h.handle = -1;
-	}
-#endif
-
-	return h;
 }
 
 void DeviceAllocation::free_immediate(DeviceAllocator &allocator)
@@ -301,15 +270,15 @@ void DeviceAllocator::init(Device *device_)
 	atom_alignment = props.limits.nonCoherentAtomSize;
 
 	heaps.clear();
-	allocators.clear();
+	free_allocators();
 
 	heaps.resize(mem_props.memoryHeapCount);
-	allocators.reserve(mem_props.memoryTypeCount);
 	for (unsigned i = 0; i < mem_props.memoryTypeCount; i++)
 	{
-		allocators.emplace_back(new Allocator(object_pool));
-		allocators.back()->set_global_allocator(this, i);
+		allocators[i] = new Allocator(object_pool);
+		allocators[i]->set_global_allocator(this, i);
 	}
+	num_allocators = mem_props.memoryTypeCount;
 
 	HeapBudget budgets[VK_MAX_MEMORY_HEAPS];
 	get_memory_budget(budgets);
@@ -335,12 +304,12 @@ void DeviceAllocator::init(Device *device_)
 		if ((combined_allowed_flags[i] & pinned_flags) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
 		{
 			has_host_only_heap = true;
-			host_heap_size = (std::max)(host_heap_size, mem_props.memoryHeaps[i].size);
+			host_heap_size = Util::max_of(host_heap_size, mem_props.memoryHeaps[i].size);
 		}
 		else if ((combined_allowed_flags[i] & pinned_flags) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 		{
 			has_device_only_heap = true;
-			device_heap_size = (std::max)(device_heap_size, mem_props.memoryHeaps[i].size);
+			device_heap_size = Util::max_of(device_heap_size, mem_props.memoryHeaps[i].size);
 		}
 	}
 
@@ -428,6 +397,17 @@ DeviceAllocator::~DeviceAllocator()
 {
 	for (auto &heap : heaps)
 		heap.garbage_collect(device);
+	free_allocators();
+}
+
+void DeviceAllocator::free_allocators()
+{
+	for (unsigned i = 0; i < num_allocators; i++)
+	{
+		delete allocators[i];
+		allocators[i] = nullptr;
+	}
+	num_allocators = 0;
 }
 
 void DeviceAllocator::internal_free(uint32_t size, uint32_t memory_type, AllocationMode mode, VkDeviceMemory memory, bool is_mapped)
@@ -562,18 +542,19 @@ bool DeviceAllocator::internal_allocate(
 	auto &heap = heaps[heap_index];
 
 	// Naive searching is fine here as vkAllocate blocks are *huge* and we won't have many of them.
-	auto itr = end(heap.blocks);
+	auto itr = heap.blocks.end();
 	if (dedicated_object == 0 && !external)
 	{
-		itr = find_if(begin(heap.blocks), end(heap.blocks),
-		              [=](const Allocation &alloc) { return size == alloc.size && memory_type == alloc.type && mode == alloc.mode; });
+		for (itr = heap.blocks.begin(); itr != heap.blocks.end(); ++itr)
+			if (size == itr->size && memory_type == itr->type && mode == itr->mode)
+				break;
 	}
 
 	bool host_visible = (mem_props.memoryTypes[memory_type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
 	                    host_memory != nullptr;
 
 	// Found previously used block.
-	if (itr != end(heap.blocks))
+	if (itr != heap.blocks.end())
 	{
 		*memory = itr->memory;
 		if (host_visible)
@@ -602,20 +583,11 @@ bool DeviceAllocator::internal_allocate(
 		     double(budgets[heap_index].max_size) / double(1024 * 1024));
 #endif
 
-		const auto log_heap_index = [&]()
-		{
-			LOGW("  Size: %u MiB.\n", unsigned(size / (1024 * 1024)));
-			LOGW("  Device usage: %u MiB.\n", unsigned(budgets[heap_index].device_usage / (1024 * 1024)));
-			LOGW("  Tracked usage: %u MiB.\n", unsigned(budgets[heap_index].tracked_usage / (1024 * 1024)));
-			LOGW("  Budget size: %u MiB.\n", unsigned(budgets[heap_index].budget_size / (1024 * 1024)));
-			LOGW("  Max size: %u MiB.\n", unsigned(budgets[heap_index].max_size / (1024 * 1024)));
-		};
-
 		// If we're going to blow out the budget, we should recycle a bit.
 		if (budgets[heap_index].device_usage + size >= budgets[heap_index].budget_size)
 		{
 			LOGW("Will exceed memory budget, cleaning up ...\n");
-			log_heap_index();
+			log_heap_budget(size, budgets[heap_index]);
 			heap.garbage_collect(device);
 		}
 
@@ -625,7 +597,7 @@ bool DeviceAllocator::internal_allocate(
 			LOGW("Even after garbage collection, we will exceed budget ...\n");
 			if (memory_heap_is_budget_critical[heap_index])
 				return false;
-			log_heap_index();
+			log_heap_budget(size, budgets[heap_index]);
 		}
 	}
 
@@ -728,19 +700,13 @@ bool DeviceAllocator::internal_allocate(
 
 		return true;
 	}
-	else
+	else if (!(external && bool(*external)))
 	{
-		// Look through our heap and see if there are blocks of other types we can free.
-		auto block_itr = begin(heap.blocks);
-		while (res != VK_SUCCESS && itr != end(heap.blocks))
-		{
-			table->vkFreeMemory(device->get_device(), block_itr->memory, nullptr);
-			heap.size -= block_itr->size;
-			res = table->vkAllocateMemory(device->get_device(), &info, nullptr, &device_memory);
-			++block_itr;
-		}
-
-		heap.blocks.erase(begin(heap.blocks), block_itr);
+		// Free cached blocks of other types until the allocation fits.
+		// An import is not retried: freeing memory cannot fix it, and its
+		// handle may already be closed.
+		res = allocate_after_freeing_cached(*table, device->get_device(), heap.blocks, heap.size,
+		                                    info, &device_memory, res);
 
 		if (res == VK_SUCCESS)
 		{
@@ -763,6 +729,8 @@ bool DeviceAllocator::internal_allocate(
 		else
 			return false;
 	}
+	else
+		return false;
 }
 
 DeviceAllocationOwner::DeviceAllocationOwner(Device *device_, const DeviceAllocation &alloc_)
@@ -776,13 +744,4 @@ DeviceAllocationOwner::~DeviceAllocationOwner()
 		device->free_memory(alloc);
 }
 
-const DeviceAllocation &DeviceAllocationOwner::get_allocation() const
-{
-	return alloc;
-}
-
-void DeviceAllocationDeleter::operator()(DeviceAllocationOwner *owner)
-{
-	owner->device->handle_pool.allocations.free(owner);
-}
 }

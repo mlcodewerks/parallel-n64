@@ -32,10 +32,9 @@
 #include "vulkan_common.hpp"
 #include "arena_allocator.hpp"
 #include <assert.h>
-#include <memory>
 #include <stddef.h>
 #include <stdint.h>
-#include <vector>
+#include "small_vector.hpp"
 
 namespace Vulkan
 {
@@ -249,12 +248,44 @@ struct HeapBudget
 	VkDeviceSize device_usage;
 };
 
+// A freed vkAllocateMemory block kept for reuse.
+struct CachedAllocation
+{
+	VkDeviceMemory memory;
+	uint32_t size;
+	uint32_t type;
+	AllocationMode mode;
+};
+
+// After an allocation failed with res, frees cached blocks oldest first,
+// retrying after each, until it succeeds or the cache is empty. The freed
+// blocks leave the cache.
+static inline VkResult allocate_after_freeing_cached(const VolkDeviceTable &table, VkDevice device,
+                                                     Util::Vector<CachedAllocation> &blocks, uint64_t &heap_size,
+                                                     const VkMemoryAllocateInfo &info, VkDeviceMemory *memory,
+                                                     VkResult res)
+{
+	size_t freed = 0;
+	while (res != VK_SUCCESS && freed < blocks.size())
+	{
+		table.vkFreeMemory(device, blocks[freed].memory, nullptr);
+		heap_size -= blocks[freed].size;
+		freed++;
+		res = table.vkAllocateMemory(device, &info, nullptr, memory);
+	}
+	blocks.erase(blocks.begin(), blocks.begin() + freed);
+	return res;
+}
+
 class DeviceAllocator
 {
 public:
 	void init(Device *device);
 
+	DeviceAllocator() = default;
 	~DeviceAllocator();
+	DeviceAllocator(const DeviceAllocator &) = delete;
+	void operator=(const DeviceAllocator &) = delete;
 
 	bool allocate_generic_memory(uint32_t size, uint32_t alignment, AllocationMode mode, uint32_t memory_type,
 	                             DeviceAllocation *alloc);
@@ -277,27 +308,21 @@ public:
 
 private:
 	Util::ObjectPool<MiniHeap> object_pool;
-	std::vector<std::unique_ptr<Allocator>> allocators;
+	Allocator *allocators[VK_MAX_MEMORY_TYPES] = {};
+	unsigned num_allocators = 0;
+	void free_allocators();
 	Device *device = nullptr;
 	const VolkDeviceTable *table = nullptr;
 	VkPhysicalDeviceMemoryProperties mem_props;
 	VkDeviceSize atom_alignment = 1;
-	struct Allocation
-	{
-		VkDeviceMemory memory;
-		uint32_t size;
-		uint32_t type;
-		AllocationMode mode;
-	};
-
 	struct Heap
 	{
 		uint64_t size = 0;
-		std::vector<Allocation> blocks;
+		Util::Vector<CachedAllocation> blocks;
 		void garbage_collect(Device *device);
 	};
 
-	std::vector<Heap> heaps;
+	Util::Vector<Heap> heaps;
 	bool memory_heap_is_budget_critical[VK_MAX_MEMORY_HEAPS] = {};
 	void get_memory_budget_nolock(HeapBudget *heaps);
 };

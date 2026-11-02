@@ -22,13 +22,12 @@
 
 #include "texture_format.hpp"
 #include "format.hpp"
-#include <algorithm>
 
 namespace Vulkan
 {
 uint32_t TextureFormatLayout::num_miplevels(uint32_t width, uint32_t height, uint32_t depth)
 {
-	uint32_t size = unsigned(std::max(std::max(width, height), depth));
+	uint32_t size = unsigned(Util::max_of(Util::max_of(width, height), depth));
 	uint32_t levels = 0;
 	while (size)
 	{
@@ -377,9 +376,9 @@ void TextureFormatLayout::fill_mipinfo(uint32_t width, uint32_t height, uint32_t
 
 		offset += mip_size;
 
-		width = std::max((width >> 1u), 1u);
-		height = std::max((height >> 1u), 1u);
-		depth = std::max((depth >> 1u), 1u);
+		width = Util::max_of((width >> 1u), 1u);
+		height = Util::max_of((height >> 1u), 1u);
+		depth = Util::max_of((depth >> 1u), 1u);
 	}
 
 	required_size = offset;
@@ -422,46 +421,6 @@ void TextureFormatLayout::set_buffer(void *buffer_, size_t size)
 	buffer_size = size;
 }
 
-uint32_t TextureFormatLayout::get_width(uint32_t mip) const
-{
-	return mips[mip].width;
-}
-
-uint32_t TextureFormatLayout::get_height(uint32_t mip) const
-{
-	return mips[mip].height;
-}
-
-uint32_t TextureFormatLayout::get_depth(uint32_t mip) const
-{
-	return mips[mip].depth;
-}
-
-uint32_t TextureFormatLayout::get_layers() const
-{
-	return array_layers;
-}
-
-VkImageType TextureFormatLayout::get_image_type() const
-{
-	return image_type;
-}
-
-VkFormat TextureFormatLayout::get_format() const
-{
-	return format;
-}
-
-uint32_t TextureFormatLayout::get_block_stride() const
-{
-	return block_stride;
-}
-
-uint32_t TextureFormatLayout::get_levels() const
-{
-	return mip_levels;
-}
-
 size_t TextureFormatLayout::get_required_size() const
 {
 	return required_size;
@@ -470,16 +429,6 @@ size_t TextureFormatLayout::get_required_size() const
 const TextureFormatLayout::MipInfo &TextureFormatLayout::get_mip_info(uint32_t mip) const
 {
 	return mips[mip];
-}
-
-uint32_t TextureFormatLayout::get_block_dim_x() const
-{
-	return block_dim_x;
-}
-
-uint32_t TextureFormatLayout::get_block_dim_y() const
-{
-	return block_dim_y;
 }
 
 size_t TextureFormatLayout::row_byte_stride(uint32_t row_length) const

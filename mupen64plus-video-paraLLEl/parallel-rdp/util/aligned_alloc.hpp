@@ -23,13 +23,11 @@
 #pragma once
 
 #include <stddef.h>
-#include <stdexcept>
-#include <new>
+#include <stdlib.h>
 
 namespace Util
 {
 void *memalign_alloc(size_t boundary, size_t size);
-void *memalign_calloc(size_t boundary, size_t size);
 void memalign_free(void *ptr);
 
 struct AlignedDeleter { void operator()(void *ptr) { memalign_free(ptr); }};
@@ -40,14 +38,14 @@ struct AlignedAllocation
     static void *operator new(size_t size)
     {
         void *ret = ::Util::memalign_alloc(alignof(T), size);
-        if (!ret) throw std::bad_alloc();
+        if (!ret) abort();
         return ret;
     }
 
     static void *operator new[](size_t size)
     {
         void *ret = ::Util::memalign_alloc(alignof(T), size);
-        if (!ret) throw std::bad_alloc();
+        if (!ret) abort();
         return ret;
     }
 

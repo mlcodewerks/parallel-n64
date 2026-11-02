@@ -173,7 +173,7 @@ private:
 
 	VkFormat color_attachments[VULKAN_NUM_ATTACHMENTS] = {};
 	VkFormat depth_stencil = VK_FORMAT_UNDEFINED;
-	std::vector<SubpassInfo> subpasses_info;
+	Util::Vector<SubpassInfo> subpasses_info;
 	pipeline_record_pass_t signature;
 
 	void setup_subpasses(const VkRenderPassCreateInfo &create_info);
@@ -192,7 +192,6 @@ public:
 
 	static unsigned setup_raw_views(VkImageView *views, const RenderPassInfo &info);
 	static void compute_dimensions(const RenderPassInfo &info, uint32_t &width, uint32_t &height);
-	static void compute_attachment_dimensions(const RenderPassInfo &info, unsigned index, uint32_t &width, uint32_t &height);
 
 	uint32_t get_width() const
 	{
@@ -252,9 +251,6 @@ public:
 	{
 	}
 
-	ImageHandle request_attachment(unsigned width, unsigned height, VkFormat format,
-	                               unsigned index = 0, unsigned samples = 1, unsigned layers = 1);
-
 	void begin_frame();
 	void clear();
 
@@ -262,7 +258,7 @@ private:
 	struct TransientNode : Util::TemporaryHashmapEnabled<TransientNode>, Util::IntrusiveListEnabled<TransientNode>
 	{
 		explicit TransientNode(ImageHandle handle_)
-		    : handle(std::move(handle_))
+		    : handle(Util::move(handle_))
 		{
 		}
 

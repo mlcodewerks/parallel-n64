@@ -23,14 +23,10 @@
 #pragma once
 
 #include <rthreads/rthreads.h>
-#include <vector>
 #include <stdint.h>
 #include <retro_atomic.h>
 #include <rthreads/retro_eventcount.h>
 
-#ifdef PARALLEL_RDP_SHADER_DIR
-#include "global_managers.hpp"
-#endif
 
 namespace RDP
 {
@@ -41,9 +37,6 @@ public:
 	// Returns false if the ring cannot run; the caller then processes
 	// commands on its own thread.
 	bool init(
-#ifdef PARALLEL_RDP_SHADER_DIR
-			Granite::Global::GlobalManagersHandle global_handles,
-#endif
 			CommandProcessor *processor, unsigned count);
 	~CommandRing();
 	void drain();
@@ -60,7 +53,10 @@ private:
 	// The counters are free-running and compared by difference, so they
 	// may wrap. No lock: each side owns its own counter and publishes it
 	// with a release store; the eventcounts only park and wake.
-	std::vector<uint32_t> ring;
+	uint32_t *ring = nullptr;
+	size_t ring_size = 0;                // a power of two
+	uint32_t *wrap_words = nullptr;      // the consumer's copy of a wrapped command
+	size_t wrap_capacity = 0;
 	retro_atomic_size_t write_count{0};     // written by the producer
 	retro_atomic_size_t read_count{0};      // written by the consumer
 	retro_atomic_size_t completed_count{0}; // written by the consumer
@@ -70,8 +66,5 @@ private:
 
 	void thread_loop();
 	static void thread_entry(void *self);
-#ifdef PARALLEL_RDP_SHADER_DIR
-	Granite::Global::GlobalManagersHandle global_handles;
-#endif
 };
 }

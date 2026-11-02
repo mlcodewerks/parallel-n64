@@ -28,9 +28,7 @@
 #include <emmintrin.h>
 #endif
 
-#ifndef PARALLEL_RDP_SHADER_DIR
 #include "shaders/slangmosh.hpp"
-#endif
 
 using namespace Vulkan;
 
@@ -41,11 +39,37 @@ using namespace Vulkan;
 
 namespace RDP
 {
+// The generated shader bank asks each shader's owner for its defines.
+struct ShaderDefineResolver
+{
+	const VideoInterface *vi;
+	const Renderer *renderer;
+	int operator()(const char *name, const char *define) const
+	{
+		if (strncmp(name, "vi_", 3) == 0)
+			return vi->resolve_shader_define(name, define);
+		return renderer->resolve_shader_define(name, define);
+	}
+};
+
+// Flattened so each shader's name folds into a direct call to its owner.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((flatten))
+#endif
+static ShaderBank *create_shader_bank(Vulkan::Device &device, Vulkan::ResourceLayout &layout,
+                                      const VideoInterface &vi, const Renderer &renderer)
+{
+	ShaderDefineResolver resolver = { &vi, &renderer };
+	return new ShaderBank(device, layout, resolver);
+}
+
 namespace
 {
 struct CoherencyNode : mpsc_stack_node_t
 {
 	CoherencyOperation op;
+	// copies the node has room for, after it
+	unsigned capacity;
 };
 
 struct TimelineWait
@@ -72,11 +96,12 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 
 	if (const char *env = getenv("PARALLEL_RDP_DUMP_PATH"))
 	{
-		dump_writer.reset(new RDPDumpWriter);
+		dump_writer = new RDPDumpWriter;
 		if (!dump_writer->init(env, rdram_size, hidden_rdram_size))
 		{
 			LOGE("Failed to init RDP dump: %s.\n", env);
-			dump_writer.reset();
+			delete dump_writer;
+			dump_writer = nullptr;
 		}
 		else
 		{
@@ -173,15 +198,18 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 	if (!single_threaded_processing)
 	{
 		if (!ring.init(
-#ifdef PARALLEL_RDP_SHADER_DIR
-				Granite::Global::create_thread_context(),
-#endif
 				this, 4 * 1024))
 			single_threaded_processing = true;
 	}
 
 	if (const char *env = getenv("PARALLEL_RDP_BENCH"))
 		timestamp = strtol(env, nullptr, 0) > 0;
+}
+
+// Here, where ShaderBank is complete.
+CommandProcessor::ShaderBankOwner::~ShaderBankOwner()
+{
+	delete bank;
 }
 
 CommandProcessor::~CommandProcessor()
@@ -192,6 +220,7 @@ CommandProcessor::~CommandProcessor()
 	// destroyed before the ring would otherwise be.
 	ring.teardown_thread();
 	rdp_upscaler_free(upscaler);
+	delete dump_writer;
 }
 
 void CommandProcessor::begin_frame_context()
@@ -202,6 +231,16 @@ void CommandProcessor::begin_frame_context()
 	const uint32_t words[1] = { uint32_t(Op::MetaNextFrameContext) << 24 };
 	enqueue_command_inner(1, words);
 	drain_command_ring();
+}
+
+unsigned CommandProcessor::get_scaling_factor() const
+{
+	return renderer.get_scaling_factor();
+}
+
+bool CommandProcessor::get_super_sampled_readback() const
+{
+	return super_sampled_readback;
 }
 
 void CommandProcessor::init_renderer()
@@ -225,13 +264,36 @@ void CommandProcessor::init_renderer()
 	else if (flags & COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT)
 		factor = 2;
 
+	// Where the device's storage buffer bindings are too small for the
+	// factor, the factor comes down; but where only the super-sampled
+	// read-back's write mask (which sits after the upscaled RDRAM) is what
+	// does not fit, the read-back goes rather than half the resolution.
+	{
+		const VkDeviceSize hidden_size = hidden_rdram->get_create_info().size;
+		unsigned plain = Renderer::fitting_upscaling_factor(device, factor, rdram_size, hidden_size, false);
+		super_sampled_readback = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT) != 0;
+		if (super_sampled_readback)
+		{
+			unsigned with_ssaa = Renderer::fitting_upscaling_factor(device, factor, rdram_size, hidden_size, true);
+			if (with_ssaa < plain || with_ssaa == 1)
+			{
+				LOGW("Super-sampled read-back does not fit this device's storage buffer bindings at %ux: off.\n",
+				     plain);
+				super_sampled_readback = false;
+			}
+		}
+		if (plain < factor)
+			LOGW("Upscaling %ux does not fit this device's storage buffer bindings: %ux.\n", factor, plain);
+		factor = plain;
+	}
 	if (factor != 1)
 		LOGI("Enabling upscaling: %ux.\n", factor);
 
 	RendererOptions opts;
 	opts.upscaling_factor = factor;
-	opts.super_sampled_readback = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT) != 0;
-	opts.super_sampled_readback_dither = (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT) != 0;
+	opts.super_sampled_readback = super_sampled_readback;
+	opts.super_sampled_readback_dither = super_sampled_readback &&
+	                                     (flags & COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT) != 0;
 	opts.no_storage_8bit = no_storage_8bit;
 
 	is_supported = renderer.init_renderer(opts);
@@ -241,17 +303,10 @@ void CommandProcessor::init_renderer()
 	vi.set_hidden_rdram(hidden_rdram.get());
 	vi.set_renderer(&renderer);
 
-#ifndef PARALLEL_RDP_SHADER_DIR
 	Vulkan::ResourceLayout layout;
-	shader_bank.reset(new ShaderBank(device, layout, [&](const char *name, const char *define) -> int {
-		if (strncmp(name, "vi_", 3) == 0)
-			return vi.resolve_shader_define(name, define);
-		else
-			return renderer.resolve_shader_define(name, define);
-	}));
-	renderer.set_shader_bank(shader_bank.get());
-	vi.set_shader_bank(shader_bank.get());
-#endif
+	shader_bank.bank = create_shader_bank(device, layout, vi, renderer);
+	renderer.set_shader_bank(shader_bank.bank);
+	vi.set_shader_bank(shader_bank.bank);
 }
 
 // Dumps keep one byte per hidden RDRAM entry in either layout.
@@ -263,10 +318,15 @@ void CommandProcessor::flush_hidden_dram_to_dump()
 	if (no_storage_8bit)
 	{
 		const uint16_t *wide = static_cast<const uint16_t *>(hidden);
-		std::vector<uint8_t> narrow(size / 2);
-		for (size_t i = 0; i < narrow.size(); i++)
+		size_t count = size / 2;
+		uint8_t *narrow = static_cast<uint8_t *>(malloc(count));
+		size_t i;
+		if (!narrow)
+			return;
+		for (i = 0; i < count; i++)
 			narrow[i] = uint8_t(wide[i]);
-		dump_writer->flush_hidden_dram(narrow.data(), uint32_t(narrow.size()));
+		dump_writer->flush_hidden_dram(narrow, uint32_t(count));
+		free(narrow);
 	}
 	else
 		dump_writer->flush_hidden_dram(hidden, uint32_t(size));
@@ -275,11 +335,6 @@ void CommandProcessor::flush_hidden_dram_to_dump()
 bool CommandProcessor::device_is_supported() const
 {
 	return is_supported;
-}
-
-void CommandProcessor::set_validation_interface(ValidationInterface *iface)
-{
-	renderer.set_validation_interface(iface);
 }
 
 void CommandProcessor::clear_hidden_rdram()
@@ -992,7 +1047,21 @@ void CommandProcessor::enqueue_command(unsigned num_words, const uint32_t *words
 			return;
 	}
 
-	if (dump_writer && !dump_in_command_list)
+	if (dump_writer)
+	{
+		enqueue_command_dumped(num_words, words);
+		return;
+	}
+
+	enqueue_command_inner(num_words, words);
+}
+
+// Out of the way of enqueue_command, which runs for every command.
+void CommandProcessor::enqueue_command_dumped(unsigned num_words, const uint32_t *words)
+{
+	uint32_t cmd_id = (words[0] >> 24) & 63;
+
+	if (!dump_in_command_list)
 	{
 		wait_for_timeline(signal_timeline());
 		dump_writer->flush_dram(begin_read_rdram(), rdram_size);
@@ -1002,17 +1071,13 @@ void CommandProcessor::enqueue_command(unsigned num_words, const uint32_t *words
 
 	enqueue_command_inner(num_words, words);
 
-	if (dump_writer)
+	if (Op(cmd_id) == Op::SyncFull)
 	{
-		uint32_t cmd_id = (words[0] >> 24) & 63;
-		if (Op(cmd_id) == Op::SyncFull)
-		{
-			dump_writer->signal_complete();
-			dump_in_command_list = false;
-		}
-		else
-			dump_writer->emit_command(cmd_id, words, num_words);
+		dump_writer->signal_complete();
+		dump_in_command_list = false;
 	}
+	else
+		dump_writer->emit_command(cmd_id, words, num_words);
 }
 
 void CommandProcessor::enqueue_command_direct(unsigned, const uint32_t *words)
@@ -1048,7 +1113,7 @@ void CommandProcessor::enqueue_command_direct(unsigned, const uint32_t *words)
 		uint64_t val = words[1] | (uint64_t(words[2]) << 32);
 		CoherencyOperation signal_op;
 		signal_op.timeline_value = val;
-		enqueue_coherency_operation(std::move(signal_op));
+		enqueue_coherency_operation(rdp_move(signal_op));
 		break;
 	}
 
@@ -1093,6 +1158,7 @@ void CommandProcessor::enqueue_command_direct(unsigned, const uint32_t *words)
 
 	case Op::MetaNextFrameContext:
 		device.next_frame_context();
+		vi.begin_frame_context();
 		break;
 
 	case Op::MetaCall:
@@ -1127,26 +1193,6 @@ void CommandProcessor::set_vi_register(VIRegister reg, uint32_t value)
 		dump_writer->set_vi_register(uint32_t(reg), value);
 }
 
-void CommandProcessor::begin_vi_register_per_scanline(VideoInterface::PerScanlineRegisterFlags vi_flags)
-{
-	vi.begin_vi_register_per_scanline(vi_flags);
-}
-
-void CommandProcessor::set_vi_register_for_scanline(VideoInterface::PerScanlineRegisterBits reg, uint32_t value)
-{
-	vi.set_vi_register_for_scanline(reg, value);
-}
-
-void CommandProcessor::latch_vi_register_for_scanline(unsigned vi_line)
-{
-	vi.latch_vi_register_for_scanline(vi_line);
-}
-
-void CommandProcessor::end_vi_register_per_scanline()
-{
-	vi.end_vi_register_per_scanline();
-}
-
 void *CommandProcessor::begin_read_rdram()
 {
 	if (rdram)
@@ -1155,38 +1201,9 @@ void *CommandProcessor::begin_read_rdram()
 		return nullptr;
 }
 
-void CommandProcessor::end_write_rdram()
-{
-	if (rdram)
-		device.unmap_host_buffer(*rdram, MEMORY_ACCESS_WRITE_BIT);
-}
-
 void *CommandProcessor::begin_read_hidden_rdram()
 {
 	return device.map_host_buffer(*hidden_rdram, MEMORY_ACCESS_READ_BIT);
-}
-
-void CommandProcessor::end_write_hidden_rdram()
-{
-	device.unmap_host_buffer(*hidden_rdram, MEMORY_ACCESS_WRITE_BIT);
-}
-
-size_t CommandProcessor::get_rdram_size() const
-{
-	if (is_host_coherent)
-		return rdram->get_create_info().size;
-	else
-		return rdram->get_create_info().size / 2;
-}
-
-size_t CommandProcessor::get_hidden_rdram_size() const
-{
-	return hidden_rdram->get_create_info().size;
-}
-
-void *CommandProcessor::get_tmem()
-{
-	return device.map_host_buffer(*tmem, MEMORY_ACCESS_READ_BIT);
 }
 
 void CommandProcessor::idle()
@@ -1227,7 +1244,7 @@ void CommandProcessor::wait_for_timeline(uint64_t index)
 	if (measure_stall_time)
 	{
 		end_ts = device.write_calibrated_timestamp();
-		device.register_time_interval("RDP CPU", std::move(start_ts), std::move(end_ts), "wait-for-timeline");
+		device.register_time_interval("RDP CPU", rdp_move(start_ts), rdp_move(end_ts), "wait-for-timeline");
 	}
 }
 
@@ -1263,7 +1280,7 @@ Vulkan::ImageHandle CommandProcessor::scanout(const ScanoutOptions &opts, VkImag
 		drain_command_ring();
 	}
 
-	return std::move(scanout_result);
+	return rdp_move(scanout_result);
 }
 
 void CommandProcessor::get_upscaler_frame(UpscalerFrame &frame)
@@ -1443,62 +1460,8 @@ void CommandProcessor::drain_command_ring()
 	if (timestamp)
 	{
 		end_ts = device.write_calibrated_timestamp();
-		device.register_time_interval("RDP CPU", std::move(start_ts), std::move(end_ts), "drain-command-ring");
+		device.register_time_interval("RDP CPU", rdp_move(start_ts), rdp_move(end_ts), "drain-command-ring");
 	}
-}
-
-void CommandProcessor::scanout_async_buffer(VIScanoutBuffer &buffer, const ScanoutOptions &opts)
-{
-	auto handle = scanout(opts, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-	if (!handle)
-	{
-		buffer.width = 0;
-		buffer.height = 0;
-		buffer.fence.reset();
-		return;
-	}
-
-	buffer.width = handle->get_width();
-	buffer.height = handle->get_height();
-
-	Vulkan::BufferCreateInfo info = {};
-	info.size = buffer.width * buffer.height * sizeof(uint32_t);
-	info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	info.domain = Vulkan::BufferDomain::CachedHost;
-	if (!buffer.buffer || buffer.buffer->get_create_info().size < info.size)
-		buffer.buffer = device.create_buffer(info);
-
-	auto cmd = device.request_command_buffer();
-	cmd->copy_image_to_buffer(*buffer.buffer, *handle, 0, {}, { buffer.width, buffer.height, 1 }, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
-	cmd->barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-	             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-
-	buffer.fence.reset();
-	device.submit(cmd, &buffer.fence);
-}
-
-void CommandProcessor::scanout_sync(std::vector<RGBA> &colors, unsigned &width, unsigned &height,
-                                    const ScanoutOptions &opts)
-{
-	VIScanoutBuffer scanout;
-	scanout_async_buffer(scanout, opts);
-
-	if (!scanout.width || !scanout.height)
-	{
-		width = 0;
-		height = 0;
-		colors.clear();
-		return;
-	}
-
-	width = scanout.width;
-	height = scanout.height;
-	colors.resize(width * height);
-
-	scanout.fence->wait();
-	memcpy(colors.data(), device.map_host_buffer(*scanout.buffer, Vulkan::MEMORY_ACCESS_READ_BIT),
-	       width * height * sizeof(uint32_t));
-	device.unmap_host_buffer(*scanout.buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
 }
 
 void CommandProcessor::timeline_work(void *user, mpsc_stack_node_t *item)
@@ -1508,7 +1471,23 @@ void CommandProcessor::timeline_work(void *user, mpsc_stack_node_t *item)
 	self->perform_coherency(node->op);
 	if (node->op.timeline_value)
 		retro_atomic_store_release_size(&self->thread_timeline_value, size_t(node->op.timeline_value));
-	delete node;
+	node->op.fence.reset();
+	mpsc_stack_push(&self->coherency_nodes.returned, node);
+}
+
+CommandProcessor::CoherencyNodePool::~CoherencyNodePool()
+{
+	mpsc_stack_node_t *lists[2] = { spare, mpsc_stack_drain(&returned) };
+	unsigned i;
+
+	for (i = 0; i < 2; i++)
+		while (lists[i])
+		{
+			auto *node = static_cast<CoherencyNode *>(lists[i]);
+			lists[i] = node->next;
+			node->~CoherencyNode();
+			::operator delete(node);
+		}
 }
 
 bool CommandProcessor::timeline_reached(void *ctx)
@@ -1608,12 +1587,14 @@ void CommandProcessor::perform_coherency(CoherencyOperation &work)
 		work.fence->wait();
 
 	if (work.unlock_cookie)
-		work.unlock_cookie->fetch_sub(1, std::memory_order_relaxed);
+		retro_atomic_fetch_sub_int(work.unlock_cookie, 1);
 
 	if (work.src)
 	{
-		for (auto &copy : work.copies)
+		unsigned c;
+		for (c = 0; c < work.num_copies; c++)
 		{
+			const CoherencyCopy &copy = work.copies[c];
 			auto *mapped_data = static_cast<uint8_t *>(device.map_host_buffer(*work.src, MEMORY_ACCESS_READ_BIT, copy.src_offset, copy.size));
 			auto *mapped_mask = static_cast<uint8_t *>(device.map_host_buffer(*work.src, MEMORY_ACCESS_READ_BIT, copy.mask_offset, copy.size));
 #if defined(PARALLEL_RDP_VERIFY_UPLOADS) && defined(__SSE2__)
@@ -1623,7 +1604,7 @@ void CommandProcessor::perform_coherency(CoherencyOperation &work)
 
 			for (unsigned i = 0; i < copy.counters; i++)
 			{
-				unsigned val = copy.counter_base[i].fetch_sub(1, std::memory_order_release);
+				int val = retro_atomic_fetch_sub_int(&copy.counter_base[i], 1);
 				(void)val;
 				assert(val > 0);
 			}
@@ -1635,10 +1616,59 @@ void CommandProcessor::perform_coherency(CoherencyOperation &work)
 	}
 }
 
+// A node with room for n copies: one the worker has handed back, or
+// failing that a new one, with its copies after it.
+static CoherencyNode *take_coherency_node(mpsc_stack_node_t **spare, mpsc_stack_t *returned, unsigned n)
+{
+	unsigned pass;
+
+	for (pass = 0; pass < 2; pass++)
+	{
+		mpsc_stack_node_t **link = spare;
+		for (; *link; link = &(*link)->next)
+		{
+			auto *node = static_cast<CoherencyNode *>(*link);
+			if (node->capacity >= n)
+			{
+				*link = node->next;
+				return node;
+			}
+		}
+		// what came back since: put in front of the rest
+		mpsc_stack_node_t *back = mpsc_stack_drain(returned);
+		if (!back)
+			break;
+		mpsc_stack_node_t *tail = back;
+		while (tail->next)
+			tail = tail->next;
+		tail->next = *spare;
+		*spare = back;
+	}
+
+	unsigned capacity = 8;
+	while (capacity < n)
+		capacity <<= 1;
+	void *mem = ::operator new(sizeof(CoherencyNode) + capacity * sizeof(CoherencyCopy));
+	auto *node = UTIL_PLACEMENT_NEW(mem) CoherencyNode;
+	node->capacity = capacity;
+	return node;
+}
+
 void CommandProcessor::enqueue_coherency_operation(CoherencyOperation &&op)
 {
-	auto *node = new CoherencyNode;
-	node->op = std::move(op);
+	auto *node = take_coherency_node(&coherency_nodes.spare, &coherency_nodes.returned, op.num_copies);
+	auto *copies = reinterpret_cast<CoherencyCopy *>(node + 1);
+	unsigned i;
+
+	for (i = 0; i < op.num_copies; i++)
+		copies[i] = op.copies[i];
+	node->op.fence = static_cast<Vulkan::Fence &&>(op.fence);
+	node->op.timeline_value = op.timeline_value;
+	node->op.dst = op.dst;
+	node->op.src = op.src;
+	node->op.copies = copies;
+	node->op.num_copies = op.num_copies;
+	node->op.unlock_cookie = op.unlock_cookie;
 	rdp_worker_push(timeline_worker.worker, node);
 }
 }
