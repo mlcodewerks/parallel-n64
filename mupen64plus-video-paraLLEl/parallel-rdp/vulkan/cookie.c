@@ -20,49 +20,42 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "semaphore_manager.hpp"
-#include "device.hpp"
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+#include "cookie.h"
 
-namespace Vulkan
+static granite_counter64_t granite_cookie;
+
+#if defined(_MSC_VER) && !defined(__clang__)
+void granite_counter64_init(granite_counter64_t *counter, uint64_t value)
 {
-void SemaphoreManager::init(Device *device_)
-{
-	device = device_;
-	table = &device->get_device_table();
+	counter->value = (__int64)value;
 }
 
-SemaphoreManager::~SemaphoreManager()
+uint64_t granite_counter64_add(granite_counter64_t *counter, uint64_t delta)
 {
-	for (auto &sem : semaphores)
-		table->vkDestroySemaphore(device->get_device(), sem, nullptr);
-}
-
-void SemaphoreManager::recycle(VkSemaphore sem)
-{
-	if (sem != VK_NULL_HANDLE)
-		semaphores.push_back(sem);
-}
-
-VkSemaphore SemaphoreManager::request_cleared_semaphore()
-{
-	if (semaphores.empty())
+	__int64 old, cur = counter->value;
+	do
 	{
-		VkSemaphoreCreateInfo info = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-		VkSemaphore semaphore;
-
-		if (table->vkCreateSemaphore(device->get_device(), &info, nullptr, &semaphore) != VK_SUCCESS)
-		{
-			LOGE("Failed to create semaphore.\n");
-			semaphore = VK_NULL_HANDLE;
-		}
-
-		return semaphore;
-	}
-	else
-	{
-		auto sem = semaphores.back();
-		semaphores.pop_back();
-		return sem;
-	}
+		old = cur;
+		cur = _InterlockedCompareExchange64(&counter->value, old + (__int64)delta, old);
+	} while (cur != old);
+	return (uint64_t)(old + (__int64)delta);
 }
+#else
+void granite_counter64_init(granite_counter64_t *counter, uint64_t value)
+{
+	__atomic_store_n(&counter->value, value, __ATOMIC_RELAXED);
+}
+
+uint64_t granite_counter64_add(granite_counter64_t *counter, uint64_t delta)
+{
+	return __atomic_add_fetch(&counter->value, delta, __ATOMIC_RELAXED);
+}
+#endif
+
+uint64_t granite_cookie_next(void)
+{
+	return granite_counter64_add(&granite_cookie, 16);
 }

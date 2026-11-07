@@ -20,43 +20,37 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#ifndef GRANITE_THREAD_ID_H
+#define GRANITE_THREAD_ID_H
 
-#include <stddef.h>
-#include <stdlib.h>
+#include <retro_common_api.h>
+#include <retro_inline.h>
 
-namespace Util
+#if defined(_MSC_VER)
+#define GRANITE_THREAD_LOCAL __declspec(thread)
+#else
+#define GRANITE_THREAD_LOCAL __thread
+#endif
+
+RETRO_BEGIN_DECLS
+
+/* The calling thread's index for per-thread state; ~0u until registered */
+extern GRANITE_THREAD_LOCAL unsigned granite_thread_index_slot;
+
+/* Reports a thread that was never registered, and gives it index 0 */
+unsigned granite_thread_index_missing(void);
+
+static INLINE unsigned granite_thread_index(void)
 {
-void *memalign_alloc(size_t boundary, size_t size);
-void memalign_free(void *ptr);
-
-struct AlignedDeleter { void operator()(void *ptr) { memalign_free(ptr); }};
-
-template <typename T>
-struct AlignedAllocation
-{
-    static void *operator new(size_t size)
-    {
-        void *ret = ::Util::memalign_alloc(alignof(T), size);
-        if (!ret) abort();
-        return ret;
-    }
-
-    static void *operator new[](size_t size)
-    {
-        void *ret = ::Util::memalign_alloc(alignof(T), size);
-        if (!ret) abort();
-        return ret;
-    }
-
-    static void operator delete(void *ptr)
-    {
-        return ::Util::memalign_free(ptr);
-    }
-
-    static void operator delete[](void *ptr)
-    {
-        return ::Util::memalign_free(ptr);
-    }
-};
+	unsigned index = granite_thread_index_slot;
+	return index != ~0u ? index : granite_thread_index_missing();
 }
+
+static INLINE void granite_register_thread_index(unsigned index)
+{
+	granite_thread_index_slot = index;
+}
+
+RETRO_END_DECLS
+
+#endif

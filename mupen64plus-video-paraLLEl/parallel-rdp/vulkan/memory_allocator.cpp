@@ -32,7 +32,7 @@
 
 namespace Vulkan
 {
-static void log_heap_budget(uint32_t size, const HeapBudget &budget)
+static UTIL_NOINLINE_COLD void log_heap_budget(uint32_t size, const HeapBudget &budget)
 {
 	LOGW("  Size: %u MiB.\n", unsigned(size / (1024 * 1024)));
 	LOGW("  Device usage: %u MiB.\n", unsigned(budget.device_usage / (1024 * 1024)));
@@ -103,7 +103,7 @@ static inline bool mode_request_host_mapping(AllocationMode mode)
 
 bool ClassAllocator::allocate_backing_heap(DeviceAllocation *alloc)
 {
-	uint32_t alloc_size = sub_block_size * Util::LegionAllocator::NumSubBlocks;
+	uint32_t alloc_size = sub_block_size * GRANITE_LEGION_SUB_BLOCKS;
 
 	if (parent)
 	{
@@ -132,7 +132,7 @@ void ClassAllocator::free_backing_heap(DeviceAllocation *allocation)
 	if (parent)
 		allocation->free_immediate();
 	else
-		allocation->free_global(*global_allocator, sub_block_size * Util::LegionAllocator::NumSubBlocks, memory_type);
+		allocation->free_global(*global_allocator, sub_block_size * GRANITE_LEGION_SUB_BLOCKS, memory_type);
 }
 
 bool Allocator::allocate_global(uint32_t size, AllocationMode mode, DeviceAllocation *alloc)
@@ -249,15 +249,15 @@ Allocator::Allocator(Util::ObjectPool<MiniHeap> &object_pool)
 		get_class_allocator(MemoryClass::Small, mode).set_sub_block_size(128);
 		// 4k chunk
 		get_class_allocator(MemoryClass::Medium, mode).set_sub_block_size(
-			128 * Util::LegionAllocator::NumSubBlocks); // 4K
+			128 * GRANITE_LEGION_SUB_BLOCKS); // 4K
 		// 128k chunk
 		get_class_allocator(MemoryClass::Large, mode).set_sub_block_size(
-			128 * Util::LegionAllocator::NumSubBlocks *
-			Util::LegionAllocator::NumSubBlocks);
+			128 * GRANITE_LEGION_SUB_BLOCKS *
+			GRANITE_LEGION_SUB_BLOCKS);
 		// 2M chunk
 		get_class_allocator(MemoryClass::Huge, mode).set_sub_block_size(
-			64 * Util::LegionAllocator::NumSubBlocks * Util::LegionAllocator::NumSubBlocks *
-			Util::LegionAllocator::NumSubBlocks);
+			64 * GRANITE_LEGION_SUB_BLOCKS * GRANITE_LEGION_SUB_BLOCKS *
+			GRANITE_LEGION_SUB_BLOCKS);
 	}
 }
 
@@ -275,7 +275,7 @@ void DeviceAllocator::init(Device *device_)
 	heaps.resize(mem_props.memoryHeapCount);
 	for (unsigned i = 0; i < mem_props.memoryTypeCount; i++)
 	{
-		allocators[i] = new Allocator(object_pool);
+		allocators[i] = Util::create<Allocator>(object_pool);
 		allocators[i]->set_global_allocator(this, i);
 	}
 	num_allocators = mem_props.memoryTypeCount;
@@ -404,8 +404,7 @@ void DeviceAllocator::free_allocators()
 {
 	for (unsigned i = 0; i < num_allocators; i++)
 	{
-		delete allocators[i];
-		allocators[i] = nullptr;
+		Util::destroy_object(allocators[i]);
 	}
 	num_allocators = 0;
 }

@@ -20,10 +20,26 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+/* vsnprintf, under a strict C89 build too */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
 
-namespace Util
+#include <stdarg.h>
+#include <compat/msvc.h>
+#include "logging.h"
+
+#ifdef __LIBRETRO__
+#include <libretro_private.h>
+
+void granite_log(enum retro_log_level level, const char *fmt, ...)
 {
-unsigned get_current_thread_index();
-void register_thread_index(unsigned thread_index);
+	/* on the stack: any thread may log */
+	char buf[1024];
+	va_list va;
+	va_start(va, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, va);
+	va_end(va);
+	log_cb(level, "%s", buf);
 }
+#endif

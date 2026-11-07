@@ -20,9 +20,52 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200112L
+#endif
 
-namespace Util
+#include <stdlib.h>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+#include "aligned_alloc.h"
+
+void *granite_memalign_alloc(size_t boundary, size_t size)
 {
-void set_current_thread_name(const char *name);
+#ifdef _WIN32
+	return _aligned_malloc(size, boundary);
+#else
+	void *ptr = NULL;
+	/* posix_memalign wants a multiple of sizeof(void *) */
+	if (boundary < sizeof(void *))
+		boundary = sizeof(void *);
+	if (posix_memalign(&ptr, boundary, size) != 0)
+		return NULL;
+	return ptr;
+#endif
+}
+
+void granite_memalign_free(void *ptr)
+{
+#ifdef _WIN32
+	_aligned_free(ptr);
+#else
+	free(ptr);
+#endif
+}
+
+void *granite_heap_new(size_t size)
+{
+	void *ptr = malloc(size);
+	if (!ptr)
+		abort();
+	return ptr;
+}
+
+void *granite_heap_new_aligned(size_t size, size_t align)
+{
+	void *ptr = granite_memalign_alloc(align, size);
+	if (!ptr)
+		abort();
+	return ptr;
 }

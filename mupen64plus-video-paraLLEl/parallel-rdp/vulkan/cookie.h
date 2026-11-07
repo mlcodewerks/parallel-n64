@@ -20,42 +20,32 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "fence_manager.hpp"
-#include "device.hpp"
+#ifndef GRANITE_COOKIE_H
+#define GRANITE_COOKIE_H
 
-namespace Vulkan
-{
-void FenceManager::init(Device *device_)
-{
-	device = device_;
-	table = &device->get_device_table();
-}
+#include <stdint.h>
+#include <retro_common_api.h>
 
-VkFence FenceManager::request_cleared_fence()
-{
-	if (!fences.empty())
-	{
-		auto ret = fences.back();
-		fences.pop_back();
-		return ret;
-	}
-	else
-	{
-		VkFence fence;
-		VkFenceCreateInfo info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-		table->vkCreateFence(device->get_device(), &info, nullptr, &fence);
-		return fence;
-	}
-}
+RETRO_BEGIN_DECLS
 
-void FenceManager::recycle_fence(VkFence fence)
+/* A 64-bit counter, atomic on 32-bit targets too */
+typedef struct granite_counter64
 {
-	fences.push_back(fence);
-}
+#if defined(_MSC_VER) && !defined(__clang__)
+	volatile __int64 value;
+#else
+	uint64_t value __attribute__((aligned(8)));
+#endif
+} granite_counter64_t;
 
-FenceManager::~FenceManager()
-{
-	for (auto &fence : fences)
-		table->vkDestroyFence(device->get_device(), fence, nullptr);
-}
-}
+void granite_counter64_init(granite_counter64_t *counter, uint64_t value);
+/* Adds, and returns the sum; relaxed */
+uint64_t granite_counter64_add(granite_counter64_t *counter, uint64_t delta);
+
+/* A value no other object has had in this process, from any thread.
+ * Steps of 16: the low bits are kept for special purposes. */
+uint64_t granite_cookie_next(void);
+
+RETRO_END_DECLS
+
+#endif

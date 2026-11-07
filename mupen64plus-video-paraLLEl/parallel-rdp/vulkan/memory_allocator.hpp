@@ -26,7 +26,7 @@
 #include "object_pool.hpp"
 #include "intrusive_list.hpp"
 #include "vulkan_headers.hpp"
-#include "logging.hpp"
+#include "logging.h"
 #include "bitops.hpp"
 #include "enum_cast.hpp"
 #include "vulkan_common.hpp"
@@ -310,7 +310,7 @@ private:
 	Util::ObjectPool<MiniHeap> object_pool;
 	Allocator *allocators[VK_MAX_MEMORY_TYPES] = {};
 	unsigned num_allocators = 0;
-	void free_allocators();
+	UTIL_NOINLINE void free_allocators();
 	Device *device = nullptr;
 	const VolkDeviceTable *table = nullptr;
 	VkPhysicalDeviceMemoryProperties mem_props;

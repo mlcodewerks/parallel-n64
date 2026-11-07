@@ -24,12 +24,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "rdp_device.hpp"
-#include "logging.hpp"
+#include "logging.h"
 #include "bitops.hpp"
 #include "luts.hpp"
 #include "incoherent_pages.hpp"
-#include "timer.hpp"
-#include "thread_name.hpp"
+#include "timer.h"
+#include "thread_name.h"
 #include "shaders/slangmosh.hpp"
 
 namespace RDP
@@ -51,7 +51,7 @@ struct PipelineNode : mpsc_stack_node_t
 
 void pipeline_worker_start(void *)
 {
-	Util::set_current_thread_name("RDP Pipelines");
+	granite_set_thread_name("RDP Pipelines");
 }
 }
 
@@ -1587,32 +1587,41 @@ void Renderer::fixup_triangle_setup(TriangleSetup &setup) const
 		setup.flags |= TRIANGLE_SETUP_FILL_COPY_RASTER_BIT;
 }
 
+// Out of line and cold: draws and loads pay only the test of validation_iface.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+void Renderer::report_rdp_crash(ValidationError err, const char *msg) const
+{
+	validation_iface->report_rdp_crash(validation_iface->user, err, msg);
+}
+
 void Renderer::validate_draw_state() const
 {
 	if ((stream.static_raster_state.flags & RASTERIZATION_FILL_BIT) != 0)
 	{
 		if (fb.fmt == FBFormat::I4)
 		{
-			validation_iface->report_rdp_crash(ValidationError::Fill4bpp,
+			report_rdp_crash(ValidationError::Fill4bpp,
 			                                   "Attempted to use Fill mode on 4bpp surface.");
 		}
 
 		if ((stream.depth_blend_state.flags & DEPTH_BLEND_DEPTH_TEST_BIT) != 0)
 		{
-			validation_iface->report_rdp_crash(ValidationError::FillDepthTest,
+			report_rdp_crash(ValidationError::FillDepthTest,
 			                                   "Attempted to use Fill mode with depth test.");
 		}
 
 		if ((stream.depth_blend_state.flags & DEPTH_BLEND_IMAGE_READ_ENABLE_BIT) != 0)
 		{
-			validation_iface->report_rdp_crash(ValidationError::FillImageReadEnable,
+			report_rdp_crash(ValidationError::FillImageReadEnable,
 			                                   "Attempted to use Fill mode with image read enable.");
 		}
 
 		if ((stream.depth_blend_state.flags & DEPTH_BLEND_DEPTH_UPDATE_BIT) != 0 &&
 		    !constants.use_prim_depth)
 		{
-			validation_iface->report_rdp_crash(ValidationError::FillDepthWrite,
+			report_rdp_crash(ValidationError::FillDepthWrite,
 			                                   "Attempted to use Fill mode with depth write enabled.");
 		}
 	}
@@ -1620,7 +1629,7 @@ void Renderer::validate_draw_state() const
 	{
 		if (fb.fmt == FBFormat::RGBA8888)
 		{
-			validation_iface->report_rdp_crash(ValidationError::Copy32bpp,
+			report_rdp_crash(ValidationError::Copy32bpp,
 			                                   "Attempted to use Copy mode on 32bpp surface.");
 		}
 	}
@@ -1962,7 +1971,7 @@ void Renderer::submit_rasterization(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &
 			cmd.extract_pipeline_state(compile);
 			if (pending_async_pipeline_insert(compile.hash))
 			{
-				auto *node = new PipelineNode;
+				auto *node = Util::create<PipelineNode>();
 				node->compile = rdp_move(compile);
 				node->kind = PIPELINE_RECORD_COMPUTE;
 				node->ahead = 0;
@@ -2341,7 +2350,7 @@ void Renderer::submit_render_pass(Vulkan::CommandBuffer &cmd)
 		render_pass_start = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	if (debug_channel)
-		cmd.begin_debug_channel(this, "Debug", 16 * 1024 * 1024);
+		cmd.begin_debug_channel(&debug_channel_iface, "Debug", 16 * 1024 * 1024);
 
 	// Here we run 3 dispatches in parallel. Span setup and TMEM instances are low occupancy kind of jobs, but the binning
 	// pass should dominate here unless the workload is trivial.
@@ -2475,7 +2484,7 @@ void Renderer::maintain_queues()
 	    pending_primitives >= Limits::MaxPrimitives ||
 	    pending_primitives_upscaled >= Limits::MaxPrimitives ||
 	    retro_atomic_load_relaxed_int(&active_submissions) == 0 ||
-	    int64_t(Util::get_current_time_nsecs() - last_submit_ns) > 1000000)
+	    int64_t(granite_time_nsecs() - last_submit_ns) > 1000000)
 	{
 		submit_to_queue();
 	}
@@ -2498,7 +2507,7 @@ void Renderer::enqueue_fence_wait(Vulkan::Fence fence)
 	op.unlock_cookie = &active_submissions;
 	retro_atomic_fetch_add_int(&active_submissions, 1);
 	processor.enqueue_coherency_operation(rdp_move(op));
-	last_submit_ns = Util::get_current_time_nsecs();
+	last_submit_ns = granite_time_nsecs();
 }
 
 void Renderer::submit_to_queue()
@@ -3276,7 +3285,7 @@ void Renderer::load_tile(uint32_t tile, const LoadTileInfo &info)
 	{
 		if ((info.thi >> 2) > (info.tlo >> 2))
 		{
-			validation_iface->report_rdp_crash(ValidationError::InvalidMultilineLoadTlut,
+			report_rdp_crash(ValidationError::InvalidMultilineLoadTlut,
 			                                   "Attempting to load multiple lines in TLUT.");
 		}
 	}
@@ -3413,7 +3422,7 @@ void Renderer::load_tile_iteration(uint32_t tile, const LoadTileInfo &info, uint
 	{
 		LOGE("4-bit VRAM pointer crashes the RDP.\n");
 		if (validation_iface)
-			validation_iface->report_rdp_crash(ValidationError::LoadTile4bpp, "4-bit VRAM pointer crashes the RDP.");
+			report_rdp_crash(ValidationError::LoadTile4bpp, "4-bit VRAM pointer crashes the RDP.");
 		return;
 	}
 
@@ -3773,7 +3782,7 @@ void Renderer::pipeline_work(void *user, mpsc_stack_node_t *item)
 	if (node->urgent)
 		retro_atomic_fetch_add_int(&renderer->pipeline_ahead_urgent_done, 1);
 	if (!node->ahead)
-		delete node;
+		Util::destroy(node);
 }
 
 void Renderer::build_pipelines_ahead(const pipeline_record_t *records, size_t count)

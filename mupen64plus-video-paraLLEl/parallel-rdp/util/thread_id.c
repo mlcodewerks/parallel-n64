@@ -20,26 +20,13 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#include "thread_id.h"
+#include "logging.h"
 
-#include "vulkan_headers.hpp"
-#include "small_vector.hpp"
+GRANITE_THREAD_LOCAL unsigned granite_thread_index_slot = ~0u;
 
-namespace Vulkan
+unsigned granite_thread_index_missing(void)
 {
-class Device;
-class SemaphoreManager
-{
-public:
-	void init(Device *device);
-	~SemaphoreManager();
-
-	VkSemaphore request_cleared_semaphore();
-	void recycle(VkSemaphore semaphore);
-
-private:
-	Device *device = nullptr;
-	const VolkDeviceTable *table = nullptr;
-	Util::Vector<VkSemaphore> semaphores;
-};
+	LOGE("Thread does not exist in thread manager or is not the main thread.\n");
+	return 0;
 }

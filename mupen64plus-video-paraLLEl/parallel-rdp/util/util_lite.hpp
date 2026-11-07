@@ -28,6 +28,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include "aligned_alloc.h"
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 #endif
@@ -88,12 +90,16 @@ static inline void copy_string(char *dst, size_t size, const char *src)
 	dst[i] = '\0';
 }
 
+/* below: delete on the C heap */
+template <typename T>
+static inline void destroy(T *t);
+
 template <typename T>
 struct DefaultDelete
 {
 	void operator()(T *t) const
 	{
-		delete t;
+		destroy(t);
 	}
 };
 
@@ -138,6 +144,108 @@ inline void operator delete(void *, Util::PlacementTag, void *) noexcept
 
 #define UTIL_PLACEMENT_NEW(p) new (::Util::PlacementTag(), (p))
 
+/* Objects on the C heap: malloc and free, with the constructor and the
+   destructor run in place, so nothing calls the C++ runtime's operator
+   new or delete. A type aligned past 8 bytes, which malloc does not
+   promise everywhere (32-bit MSVC), comes from memalign. */
+namespace Util
+{
+/* Clang and MSVC name it as the standard trait does; GCC up to 13 has
+   only the older builtin, which Clang now warns of. */
+#if defined(__clang__) || defined(_MSC_VER)
+#define UTIL_IS_TRIVIALLY_DESTRUCTIBLE(T) __is_trivially_destructible(T)
+#else
+#define UTIL_IS_TRIVIALLY_DESTRUCTIBLE(T) __has_trivial_destructor(T)
+#endif
+
+template <typename T>
+static inline void *heap_alloc(size_t size)
+{
+	return alignof(T) > 8 ? granite_heap_new_aligned(size, alignof(T)) : granite_heap_new(size);
+}
+
+template <typename T>
+static inline void heap_free(void *p)
+{
+	if (alignof(T) > 8)
+		granite_memalign_free(p);
+	else
+		free(p);
+}
+
+/* new T(p...) */
+template <typename T, typename P0, typename... P>
+static inline T *create(P0 &&p0, P &&... p)
+{
+	void *mem = heap_alloc<T>(sizeof(T));
+	return UTIL_PLACEMENT_NEW(mem) T(forward<P0>(p0), forward<P>(p)...);
+}
+
+/* new T(p...) for any number of arguments: with none, T() (zeroed where T
+   has no constructor of its own), as a template forwarding a pack spells it */
+template <typename T, typename... P>
+static inline T *create_init(P &&... p)
+{
+	void *mem = heap_alloc<T>(sizeof(T));
+	return UTIL_PLACEMENT_NEW(mem) T(forward<P>(p)...);
+}
+
+/* new T: default-initialized, as a new-expression without () leaves it */
+template <typename T>
+static inline T *create()
+{
+	void *mem = heap_alloc<T>(sizeof(T));
+	return UTIL_PLACEMENT_NEW(mem) T;
+}
+
+/* delete t: a destructor that does anything runs out of line, once per
+   type, as a deleting destructor does, rather than at every call */
+template <typename T>
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#elif defined(_MSC_VER)
+__declspec(noinline)
+#endif
+void destroy_object(T *t)
+{
+	t->~T();
+	heap_free<T>(t);
+}
+
+template <typename T>
+static inline void destroy(T *t)
+{
+	if (!t)
+		return;
+	if (UTIL_IS_TRIVIALLY_DESTRUCTIBLE(T))
+		heap_free<T>(t);
+	else
+		destroy_object(t);
+}
+
+/* new T[n] (default-initialized), and delete[] */
+template <typename T>
+static inline T *create_array(size_t n)
+{
+	size_t i;
+	T *a = static_cast<T *>(heap_alloc<T>(n * sizeof(T)));
+	for (i = 0; i < n; i++)
+		UTIL_PLACEMENT_NEW(&a[i]) T;
+	return a;
+}
+
+template <typename T>
+static inline void destroy_array(T *a, size_t n)
+{
+	if (a)
+	{
+		while (n--)
+			a[n].~T();
+		heap_free<T>(a);
+	}
+}
+}
+
 /* Builtins of GCC, Clang and MSVC alike */
 #define UTIL_UNDERLYING_TYPE(T) __underlying_type(T)
 #define UTIL_IS_BASE_OF(B, D) __is_base_of(B, D)
@@ -145,6 +253,7 @@ inline void operator delete(void *, Util::PlacementTag, void *) noexcept
 /* Out-of-line slow paths, and the index of the highest set bit */
 #if defined(_MSC_VER)
 #define UTIL_NOINLINE_COLD __declspec(noinline)
+#define UTIL_NOINLINE __declspec(noinline)
 static inline unsigned util_bsr32(uint32_t v)
 {
 	unsigned long r;
@@ -153,37 +262,12 @@ static inline unsigned util_bsr32(uint32_t v)
 }
 #else
 #define UTIL_NOINLINE_COLD __attribute__((noinline, cold))
+#define UTIL_NOINLINE __attribute__((noinline))
 static inline unsigned util_bsr32(uint32_t v)
 {
 	return 31u - (unsigned)__builtin_clz(v);
 }
 #endif
-
-namespace Util
-{
-/* 64-bit counter, atomic on 32-bit targets too */
-struct AtomicU64
-{
-#if defined(_MSC_VER) && !defined(__clang__)
-	volatile __int64 v;
-	void init(uint64_t x) { v = (__int64)x; }
-	uint64_t add_fetch_relaxed(uint64_t d)
-	{
-		__int64 old, cur = v;
-		do
-		{
-			old = cur;
-			cur = _InterlockedCompareExchange64(&v, old + (__int64)d, old);
-		} while (cur != old);
-		return (uint64_t)(old + (__int64)d);
-	}
-#else
-	uint64_t v __attribute__((aligned(8)));
-	void init(uint64_t x) { __atomic_store_n(&v, x, __ATOMIC_RELAXED); }
-	uint64_t add_fetch_relaxed(uint64_t d) { return __atomic_add_fetch(&v, d, __ATOMIC_RELAXED); }
-#endif
-};
-}
 
 namespace Util
 {
@@ -209,7 +293,7 @@ public:
 	{
 		unsigned i;
 		for (i = 0; i < count; i++)
-			delete items[i];
+			destroy(items[i]);
 		count = 0;
 	}
 

@@ -20,26 +20,16 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "thread_id.hpp"
-#include "logging.hpp"
+#ifndef GRANITE_THREAD_NAME_H
+#define GRANITE_THREAD_NAME_H
 
-namespace Util
-{
-static thread_local unsigned thread_id_to_index = ~0u;
+#include <retro_common_api.h>
 
-unsigned get_current_thread_index()
-{
-	auto ret = thread_id_to_index;
-	if (ret == ~0u)
-	{
-		LOGE("Thread does not exist in thread manager or is not the main thread.\n");
-		return 0;
-	}
-	return ret;
-}
+RETRO_BEGIN_DECLS
 
-void register_thread_index(unsigned index)
-{
-	thread_id_to_index = index;
-}
-}
+/* Names the calling thread for debuggers and profilers, where the OS can */
+void granite_set_thread_name(const char *name);
+
+RETRO_END_DECLS
+
+#endif

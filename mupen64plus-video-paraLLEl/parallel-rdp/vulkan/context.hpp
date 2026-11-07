@@ -23,13 +23,9 @@
 #pragma once
 
 #include "vulkan_headers.hpp"
-#include "logging.hpp"
+#include "logging.h"
+#include "timeline_trace_file.h"
 #include "vulkan_common.hpp"
-
-namespace Util
-{
-class TimelineTraceFile;
-}
 
 namespace Granite
 {
@@ -134,8 +130,8 @@ struct QueueInfo
 // libretro frontend that adds what it needs to the create info.
 struct DeviceFactory
 {
-	virtual ~DeviceFactory() = default;
-	virtual VkDevice create_device(VkPhysicalDevice gpu, const VkDeviceCreateInfo *info) = 0;
+	VkDevice (*create_device)(void *user, VkPhysicalDevice gpu, const VkDeviceCreateInfo *info);
+	void *user;
 };
 
 class Context
@@ -230,7 +226,7 @@ public:
 
 	struct SystemHandles
 	{
-		Util::TimelineTraceFile *timeline_trace_file = nullptr;
+		granite_trace_file_t *timeline_trace_file = nullptr;
 		Granite::Filesystem *filesystem = nullptr;
 		Granite::ThreadGroup *thread_group = nullptr;
 	};

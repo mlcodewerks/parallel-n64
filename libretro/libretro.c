@@ -1,25 +1,4 @@
 #include <stdio.h>
-#include <mupen64plus-next_common.h>
-
-/* libretro-fork compat: legacy CONT_* controller-presence + M64CMD_DDROM_OPEN +
- * mempak format defaults, retained for the fork's libretro glue (next dropped
- * these names but the underlying values are unchanged). */
-#ifndef CONT_NONE
-#define CONT_NONE     0
-#define CONT_JOYPAD   1
-#define CONT_MOUSE    2
-#define CONT_GCN      4
-#endif
-#ifndef M64CMD_DDROM_OPEN
-#define M64CMD_DDROM_OPEN 25
-#endif
-#ifndef DEFAULT_MEMPAK_DEVICEID
-#define DEFAULT_MEMPAK_DEVICEID 0x0500
-#define DEFAULT_MEMPAK_BANKS    1
-#define DEFAULT_MEMPAK_VERSION  0
-#endif
-
-uint8_t* g_dd_disk;
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -31,8 +10,18 @@ uint8_t* g_dd_disk;
 
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
 #include <glsm/glsmsym.h>
+#else
+/* Targets built without a GL renderer - iOS, for one - still need a glsm_ctl
+ * for the callers below. glsmsym.h cannot be included for it: its prototypes
+ * are desktop-GL typed (GLclampd, GLdouble), and glsm.h only supplies those
+ * typedefs when one of the HAVE_OPENGLES* defines is set, while the headers
+ * rglgen pulls in on iOS are ES ones that do not carry them. glsm.h alone is
+ * enough here - the stub needs the enum and nothing else. */
+#include <glsm/glsm.h>
+bool glsm_ctl(enum glsm_state_ctl state, void *data) { return false; }
 #endif
 
+#include <mupen64plus-next_common.h>
 #include "api/m64p_frontend.h"
 #include "plugin/plugin.h"
 #include "api/m64p_types.h"
@@ -66,17 +55,22 @@ uint8_t* g_dd_disk;
 #include "../mupen64plus-video-angrylion/vdac.h"
 #endif
 
-#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
-#include <glsm/glsmsym.h>
-#else
-/* Targets built without a GL renderer - iOS, for one - still need a glsm_ctl
- * for the callers below. glsmsym.h cannot be included for it: its prototypes
- * are desktop-GL typed (GLclampd, GLdouble), and glsm.h only supplies those
- * typedefs when one of the HAVE_OPENGLES* defines is set, while the headers
- * rglgen pulls in on iOS are ES ones that do not carry them. glsm.h alone is
- * enough here - the stub needs the enum and nothing else. */
-#include <glsm/glsm.h>
-bool glsm_ctl(enum glsm_state_ctl state, void *data) { return false; }
+/* libretro-fork compat: legacy CONT_* controller-presence + M64CMD_DDROM_OPEN +
+ * mempak format defaults, retained for the fork's libretro glue (next dropped
+ * these names but the underlying values are unchanged). */
+#ifndef CONT_NONE
+#define CONT_NONE     0
+#define CONT_JOYPAD   1
+#define CONT_MOUSE    2
+#define CONT_GCN      4
+#endif
+#ifndef M64CMD_DDROM_OPEN
+#define M64CMD_DDROM_OPEN 25
+#endif
+#ifndef DEFAULT_MEMPAK_DEVICEID
+#define DEFAULT_MEMPAK_DEVICEID 0x0500
+#define DEFAULT_MEMPAK_BANKS    1
+#define DEFAULT_MEMPAK_VERSION  0
 #endif
 
 #ifndef PRESCALE_WIDTH
@@ -105,6 +99,7 @@ extern void riceRomClosed(void);
 static struct retro_hw_render_callback hw_render;
 static struct retro_hw_render_context_negotiation_interface_vulkan hw_context_negotiation;
 static const struct retro_hw_render_interface_vulkan *vulkan;
+static void reset_upscaler_options(void);
 #endif
 
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
@@ -161,6 +156,7 @@ char* retro_transferpak_ram_path = NULL;
 
 /* fork 64DD: a fresh disk image is an empty (zeroed) buffer; the IPL writes
  * its own structure on first use. next has no format_disk, so define it here. */
+uint8_t* g_dd_disk;
 void format_disk(uint8_t* disk)
 {
    if (disk) memset(disk, 0, 0x0435B0C0);
@@ -284,15 +280,12 @@ static uint32_t disk_size           = 0;
 /* Set from the 64DD Hardware core option, read at content load. */
 static bool     dd_hardware         = false;
 
-static bool     emu_initialized     = false;
-static unsigned initial_boot        = true;
-
 static unsigned retro_filtering     = 0;
 static unsigned retro_dithering     = 0;
 static bool     reinit_screen       = false;
 static bool     first_context_reset = false;
 static bool     context_setup_first_init = false;
-
+static bool     emu_initialized     = false;
 
 /* Set per retro_run from RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE: nonzero
  * means the frontend will discard this frame's video (a run-ahead "future"
@@ -502,11 +495,6 @@ static void core_settings_autoselect_gfx_plugin(void)
 #endif
 }
 
-unsigned libretro_get_gfx_plugin(void)
-{
-   return gfx_plugin;
-}
-
 static void core_settings_autoselect_rsp_plugin(void);
 
 static void core_settings_set_defaults(void)
@@ -659,18 +647,12 @@ static void core_settings_autoselect_rsp_plugin(void)
 
 static bool set_variable_visibility(void)
 {
-    // For simplicity we create a prepared var per plugin, maybe create a macro for this?
-    struct retro_core_option_display option_display_gliden64;
-    struct retro_core_option_display option_display_angrylion;
-    struct retro_core_option_display option_display_parallel;
-    struct retro_core_option_display option_display_glide64;
-
+    struct retro_variable var;
+    struct retro_core_option_display option_display;
     size_t i;
     size_t num_options = 0;
-    char **values_buf = NULL;
-    struct retro_variable var;
     const char *rdp_plugin_current = "__NULL__";
-    bool rdp_plugin_found = false;
+    const char *rdp_plugin_prefix = NULL;
 
     // If option categories are supported but
     // the option update display callback is not,
@@ -683,10 +665,7 @@ static bool set_variable_visibility(void)
     var.key = CORE_NAME "-gfxplugin";
     var.value = NULL;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-    {
         rdp_plugin_current = var.value;
-        rdp_plugin_found = true;
-    }
 
     // Check if plugin has changed since last
     // call of this function
@@ -695,15 +674,17 @@ static bool set_variable_visibility(void)
 
     strncpy(rdp_plugin_last, rdp_plugin_current, sizeof(rdp_plugin_last));
 
-    // Show/hide options depending on Plugins (Active isn't relevant!)
-    if (rdp_plugin_found)
+    // Define gfx plugin specific option description prefix
+    if (rdp_plugin_current)
     {
-        option_display_gliden64.visible = !strcmp(rdp_plugin_current, "gliden64");
-        option_display_angrylion.visible = !strcmp(rdp_plugin_current, "angrylion");
-        option_display_parallel.visible = !strcmp(rdp_plugin_current, "parallel");
-        option_display_glide64.visible = !strcmp(rdp_plugin_current, "glide64");
-    } else {
-        option_display_gliden64.visible = option_display_angrylion.visible = option_display_parallel.visible = option_display_glide64.visible = true;
+        if (!strcmp(rdp_plugin_current, "angrylion"))
+           rdp_plugin_prefix = "Angrylion: ";
+        else if (!strcmp(rdp_plugin_current, "parallel"))
+           rdp_plugin_prefix = "ParaLLEl: ";
+        else if (!strcmp(rdp_plugin_current, "glide64"))
+           rdp_plugin_prefix = "Glide64: ";
+        else if (!strcmp(rdp_plugin_current, "gliden64"))
+           rdp_plugin_prefix = "GLideN64: ";
     }
 
     // Determine number of options
@@ -714,35 +695,59 @@ static bool set_variable_visibility(void)
         num_options++;
     }
 
-    // Copy parameters from option_defs_us array
     for (i = 0; i < num_options; i++)
     {
         const char *key  = option_defs_us[i].key;
-        const char *hint = option_defs_us[i].info;
-        if (hint)
+        const char *desc = option_defs_us[i].desc;
+
+        // Show video options depending on selected plugin
+        if (desc && !(strcmp(option_defs_us[i].category_key, "video")))
         {
-            // Quick and dirty, its the only consistent naming
-            // Otherwise GlideN64 Setting keys will need to be broken again..
-            if (!!strstr(hint, "(GLideN64)"))
+            bool gfx_plugin_specific = strstr(desc, ": ");
+
+            option_display.key     = key;
+            option_display.visible = true;
+
+            if (gfx_plugin_specific && !strcmp(rdp_plugin_current, "parallel") && !strstr(desc, rdp_plugin_prefix))
+                option_display.visible = false;
+            else if (gfx_plugin_specific && !strcmp(rdp_plugin_current, "angrylion") && !strstr(desc, rdp_plugin_prefix))
+                option_display.visible = false;
+            else if (gfx_plugin_specific && !strcmp(rdp_plugin_current, "glide64") && !strstr(desc, rdp_plugin_prefix))
+                option_display.visible = false;
+            else if (gfx_plugin_specific && !strcmp(rdp_plugin_current, "gliden64") && !strstr(desc, rdp_plugin_prefix))
+                option_display.visible = false;
+            else if (gfx_plugin_specific && !rdp_plugin_prefix)
+                option_display.visible = false;
+            
+            // ParaLLEl and Angrylion use "upscaling" and "native-texture-lod", others only "screensize"
+            if (!strcmp(rdp_plugin_current, "parallel") || !strcmp(rdp_plugin_current, "angrylion"))
             {
-                option_display_gliden64.key = key;
-                environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display_gliden64);
-            } else if (!!strstr(hint, "(Angrylion)"))
-            {
-                option_display_angrylion.key = key;
-                environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display_angrylion);
-            } else if (!!strstr(key, "(ParaLLEl-RDP)")) // Maybe unify it later?
-            {
-                option_display_parallel.key = key;
-                environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display_glide64);
-            } else if (!!strstr(key, "(Glide64)")) // Maybe unify it later?
-            {
-                option_display_glide64.key = key;
-                environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display_parallel);
+                if (!strcmp(key, "parallel-n64-screensize"))
+                    option_display.visible = false;
             }
+            else
+            {
+                if (       !strcmp(key, "parallel-n64-upscaling")
+                        || !strcmp(key, "parallel-n64-parallel-rdp-native-texture-lod"))
+                    option_display.visible = false;
+            }
+
+            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
+        }
+        // Show VR options only for GLideN64
+        else if (desc && !(strcmp(option_defs_us[i].category_key, "vr")))
+        {
+            option_display.key     = key;
+            option_display.visible = !strcmp(rdp_plugin_current, "gliden64");
+
+            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
         }
     }
 
+#ifdef HAVE_PARALLEL
+    // Reset temporal upscaling options for hiding them again
+    reset_upscaler_options();
+#endif
     return true;
 }
 
@@ -754,9 +759,8 @@ static void setup_variables(void)
 
    static const struct retro_controller_description port[] = {
       { "Controller", RETRO_DEVICE_JOYPAD },
+      { "Gamecube Controller", RETRO_DEVICE_ANALOG },
       { "Mouse", RETRO_DEVICE_MOUSE },
-      { "RetroPad", RETRO_DEVICE_JOYPAD },
-      { "Analog", RETRO_DEVICE_ANALOG },
    };
 
    static const struct retro_controller_info ports[] = {
@@ -776,7 +780,12 @@ static void setup_variables(void)
             RETRO_ENVIRONMENT_SET_CORE_OPTIONS_UPDATE_DISPLAY_CALLBACK,
             &updateDisplayCb);
     if (updateDisplayCbSupported)
+    {
         CoreOptionUpdateDisplayCbSupported = 1;
+        /* FIXME: Enforce initial trigger since playlist launch does not
+         * call the callback, but CLI launch does.. */
+        set_variable_visibility();
+    }
 
    environ_cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void*)ports);
    environ_cb(RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO, (void*)subsystems);
@@ -1106,6 +1115,20 @@ void emu_step_render(void)
       return;
    }
 
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+   /* Glide64, glN64 and Rice: the frame they last finished, put in the
+    * frontend's framebuffer for this slice, every slice, as GLideN64
+    * hands one over every VI. Handed none, a frontend that rotates its
+    * framebuffers presents the one it last had again; under threaded
+    * video that was not always the frame last finished. */
+   if ((gfx_plugin == GFX_GLIDE64 || gfx_plugin == GFX_GLN64 || gfx_plugin == GFX_RICE)
+         && glsm_draw_target_show())
+   {
+      frame_latched = false;
+      present_frame();
+      return;
+   }
+#endif
    if (frame_latched)
    {
       frame_latched = false;
@@ -1181,6 +1204,12 @@ static void update_upscaler_options(void)
       display.key = keys[i];
       environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &display);
    }
+}
+
+static void reset_upscaler_options(void)
+{
+    upscaler_options_hidden = false;
+    update_upscaler_options();
 }
 #endif
 
@@ -1506,7 +1535,10 @@ static void context_reset(void)
           * before a context exists. */
          if (gfx_plugin == GFX_GLIDEN64 && !first_context_reset)
          {
+            /* its objects were the lost context's: forgotten, not deleted */
+            glsm_abandon_objects(true);
             gliden64DestroyGfxContext();
+            glsm_abandon_objects(false);
             gliden64ReinitGfxContext();
          }
 #endif
@@ -1703,7 +1735,7 @@ extern void ChangeSize();
 static void gfx_set_filtering(void)
 {
      if (log_cb)
-        log_cb(RETRO_LOG_DEBUG, "set filtering mode...\n");
+        log_cb(RETRO_LOG_DEBUG, "Set filtering mode...\n");
      switch (gfx_plugin)
      {
         case GFX_GLIDE64:
@@ -1746,7 +1778,7 @@ unsigned setting_get_dithering(void)
 static void gfx_set_dithering(void)
 {
    if (log_cb)
-      log_cb(RETRO_LOG_DEBUG, "set dithering mode...\n");
+      log_cb(RETRO_LOG_DEBUG, "Set dithering mode...\n");
 
    switch (gfx_plugin)
    {
@@ -2395,7 +2427,7 @@ void update_variables(bool startup)
 #endif
             sscanf(var.value ? var.value : "640x480", "%dx%d", &screen_width, &screen_height) != 2)
       {
-         screen_width = 640;
+         screen_width  = 640;
          screen_height = 480;
       }
    }
@@ -3476,8 +3508,6 @@ bool retro_load_game(const struct retro_game_info *game)
    VRMode = VR_MODE_OFF;
 #endif
    update_variables(true);
-   initial_boot = false;
-
    init_audio_libretro();
 
 #ifdef HAVE_THR_AL
@@ -3710,6 +3740,15 @@ static void glsm_enter(void)
    if (gfx_plugin != GFX_GLIDE64 && gfx_plugin != GFX_GLN64 &&
        gfx_plugin != GFX_RICE && gfx_plugin != GFX_GLIDEN64)
       return;
+   /* Glide64, glN64 and Rice draw on into the next frame after a swap,
+    * before the VI ends the slice: they draw into a target of the core's
+    * own, retro_return(true) keeps each frame they finish, and
+    * emu_step_render puts it in the frontend's. GLideN64 draws into its own framebuffers and blits the
+    * finished frame to the frontend's itself. */
+   if (gfx_plugin == GFX_GLIDEN64)
+      glsm_draw_target(0, 0);
+   else
+      glsm_draw_target(screen_width, screen_height);
    glsm_ctl(GLSM_CTL_STATE_BIND, NULL);
 #endif
 }
@@ -4163,6 +4202,12 @@ int retro_return(bool just_flipping)
 
    if (just_flipping)
    {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+      /* The renderer goes straight on to the next frame: the one it
+       * finished is kept now, for emu_step_render to show. */
+      if (gfx_plugin == GFX_GLIDE64 || gfx_plugin == GFX_GLN64 || gfx_plugin == GFX_RICE)
+         glsm_draw_target_present();
+#endif
       /* Latch the frame for presentation after the glsm state is unbound.
        * video_cb must not run while glsm still has the core's GL state bound
        * (FBO, program, textures): the frontend composites the hardware frame
@@ -4170,9 +4215,7 @@ int retro_return(bool just_flipping)
        * presents these renderers only after GLSM_CTL_STATE_UNBIND. Presenting
        * from here -- inside the bind window, as OGL_SwapBuffers does -- left the
        * screen black and corrupted the frontend on the compatibility gl driver
-       * (the glcore path tolerated the dirty state and so masked it). The frame
-       * still exists in the single hardware FBO when emu_step_render presents it
-       * immediately after glsm_exit, before the next slice clears it. */
+       * (the glcore path tolerated the dirty state and so masked it). */
       frame_latched = true;
       return 0;
    }

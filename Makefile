@@ -19,6 +19,10 @@ HAVE_THR_AL?=1
 STATIC_LINKING=0
 HAVE_LTCG ?= 0
 
+ifeq ($(ECHO),1)
+    E := 1
+endif
+
 DYNAFLAGS :=
 INCFLAGS  :=
 COREFLAGS :=
@@ -1203,9 +1207,11 @@ $(VIDEODIR_ANGRYLION)/%.o: CFLAGS += -fwrapv
 endif
 
 %.o: %.c
+	@$(if $(E), $(shell echo echo CC $<),)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< $(OBJOUT)$@
 
 %.o: %.cpp
+	@$(if $(E), $(shell echo echo CXX $<),)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< $(OBJOUT)$@
 
 ifeq (,$(findstring msvc,$(platform)))
@@ -1217,7 +1223,7 @@ clean: clean-tools
 
 clean-tools:
 	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) lrhost_gl$(EXE_EXT) $(GLITCH64_TESTS) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) dd_ipl_hle_test$(EXE_EXT) \
-		$(CORE_CHECKS) dynarec_long_block_test$(EXE_EXT) savestate_latch_test$(EXE_EXT) savestate_code_test$(EXE_EXT) cpu_fallback_test$(EXE_EXT) tools/test_prsp_dmem_wrap.o tools/test_command_ring_rthreads.o tools/test_command_ring_ec.o tools/test_granite_util_rthreads.o
+		$(CORE_CHECKS) dynarec_long_block_test$(EXE_EXT) savestate_latch_test$(EXE_EXT) savestate_code_test$(EXE_EXT) cpu_fallback_test$(EXE_EXT) tools/test_prsp_dmem_wrap.o tools/test_granite_util_rthreads.o $(GRANITE_POOL_TEST_OBJS)
 
 # Angrylion benchmark and bit-exactness harnesses (tools/angrylion_*.c),
 # linked against the core's own angrylion objects: `make tools` after a
@@ -1273,7 +1279,28 @@ test_glitch64_textures$(EXE_EXT): tools/test_glitch64_textures.c $(GLITCH64_TEST
 test_glitch64_textures_gles$(EXE_EXT): tools/test_glitch64_textures.c $(GLITCH64_TEST_SRCS)
 	$(CC) $(GLITCH64_TEST_FLAGS) $(GLITCH64_GLES_FLAGS) $< $(GLITCH64_TEST_SRCS) $(LIBRETRO_COMM_DIR)/glsym/glsym_es2.c \
 		-o $@ $(filter -fsanitize=%,$(LDFLAGS)) -lEGL -lGLESv2 -lm
-GLITCH64_TESTS := test_glitch64_lfb_write$(EXE_EXT) test_glitch64_textures$(EXE_EXT) test_glitch64_textures_gles$(EXE_EXT)
+# glsm's draw target: the frontend presents the frame a renderer swapped,
+# through the blit (desktop GL) and the texture copy (GLES 2); and the
+# state glsm keeps is the state GL holds while the core draws
+GLSM_TEST_SRCS := $(ROOT_DIR)/libretro/glsm/glsm.c $(LIBRETRO_COMM_DIR)/gfx/gl_capabilities.c $(LIBRETRO_COMM_DIR)/glsym/rglgen.c
+GLSM_TEST_FLAGS := -D__LIBRETRO__ -I$(ROOT_DIR)/libretro -I$(LIBRETRO_COMM_DIR)/include \
+	$(filter -fsanitize=% -O% -g,$(CFLAGS)) -w
+test_glsm_draw_target$(EXE_EXT): tools/test_glsm_draw_target.c $(GLSM_TEST_SRCS)
+	$(CC) $(GLSM_TEST_FLAGS) -DHAVE_OPENGL $< $(GLSM_TEST_SRCS) $(LIBRETRO_COMM_DIR)/glsym/glsym_gl.c \
+		-o $@ $(filter -fsanitize=%,$(LDFLAGS)) -lEGL -lGL -lm
+test_glsm_draw_target_gles$(EXE_EXT): tools/test_glsm_draw_target.c $(GLSM_TEST_SRCS)
+	$(CC) $(GLSM_TEST_FLAGS) -DHAVE_OPENGLES -DHAVE_OPENGLES2 $< $(GLSM_TEST_SRCS) $(LIBRETRO_COMM_DIR)/glsym/glsym_es2.c \
+		-o $@ $(filter -fsanitize=%,$(LDFLAGS)) -lEGL -lGLESv2 -lm
+
+test_glsm_state$(EXE_EXT): tools/test_glsm_state.c $(GLSM_TEST_SRCS)
+	$(CC) $(GLSM_TEST_FLAGS) -DHAVE_OPENGL $< $(GLSM_TEST_SRCS) $(LIBRETRO_COMM_DIR)/glsym/glsym_gl.c \
+		-o $@ $(filter -fsanitize=%,$(LDFLAGS)) -lEGL -lGL -lm
+test_glsm_state_gles$(EXE_EXT): tools/test_glsm_state.c $(GLSM_TEST_SRCS)
+	$(CC) $(GLSM_TEST_FLAGS) -DHAVE_OPENGLES -DHAVE_OPENGLES2 $< $(GLSM_TEST_SRCS) $(LIBRETRO_COMM_DIR)/glsym/glsym_es2.c \
+		-o $@ $(filter -fsanitize=%,$(LDFLAGS)) -lEGL -lGLESv2 -lm
+
+GLITCH64_TESTS := test_glitch64_lfb_write$(EXE_EXT) test_glitch64_textures$(EXE_EXT) test_glitch64_textures_gles$(EXE_EXT) \
+	test_glsm_draw_target$(EXE_EXT) test_glsm_draw_target_gles$(EXE_EXT) test_glsm_state$(EXE_EXT) test_glsm_state_gles$(EXE_EXT)
 
 angrylion_replay$(EXE_EXT): tools/angrylion_replay.c $(ANGRYLION_TOOL_OBJS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(VIDEODIR_ANGRYLION) -w $< $(ANGRYLION_TOOL_OBJS) -o $@ -lpthread -lm
@@ -1657,41 +1684,73 @@ test_rdp_x_range$(EXE_EXT): tools/test_rdp_x_range.cpp $(VIDEODIR_PARALLEL)/para
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp \
 		-I$(VIDEODIR_PARALLEL)/parallel-rdp/util $< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
+# Granite's object pools (util/pool.c) and aligned allocation, built as C
+# once for the tests that use them
+GRANITE_POOL_TEST_OBJS := tools/granite_pool_for_tests.o tools/granite_aligned_for_tests.o
+tools/granite_pool_for_tests.o: $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.h
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include -c $< -o $@
+tools/granite_aligned_for_tests.o: $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.h
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include -c $< -o $@
+
+# The slot pools themselves, for odd slot sizes and from several threads
+test_granite_pool$(EXE_EXT): tools/test_granite_pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_PARALLEL)/parallel-rdp/util -I$(LIBRETRO_COMM_DIR)/include \
+		$^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
 # Granite's util containers, written without the standard library
 test_granite_util$(EXE_EXT): tools/test_granite_util.cpp $(wildcard $(VIDEODIR_PARALLEL)/parallel-rdp/util/*.hpp) \
+		$(wildcard $(VIDEODIR_PARALLEL)/parallel-rdp/util/*.h) $(GRANITE_POOL_TEST_OBJS) \
 		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include -c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c -o tools/test_granite_util_rthreads.o
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW -I$(VIDEODIR_PARALLEL)/parallel-rdp/util \
-		-I$(LIBRETRO_COMM_DIR)/include $< $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.cpp tools/test_granite_util_rthreads.o \
+		-I$(LIBRETRO_COMM_DIR)/include $< $(GRANITE_POOL_TEST_OBJS) tools/test_granite_util_rthreads.o \
 		-o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
 
 # Granite's allocation retry after freeing cached memory blocks
-test_vk_alloc_fallback$(EXE_EXT): tools/test_vk_alloc_fallback.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.hpp
+test_vk_alloc_fallback$(EXE_EXT): tools/test_vk_alloc_fallback.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.hpp \
+		$(GRANITE_POOL_TEST_OBJS)
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DGRANITE_VULKAN_MT -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
-		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+		$< $(GRANITE_POOL_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
 # parallel-RDP's VI intermediate image reuse rules
 test_incoherent_pages$(EXE_EXT): tools/test_incoherent_pages.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/incoherent_pages.hpp
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp -I$(VIDEODIR_PARALLEL)/parallel-rdp/util $< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
-test_vi_image_pool$(EXE_EXT): tools/test_vi_image_pool.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/vi_image_pool.hpp
+test_vi_image_pool$(EXE_EXT): tools/test_vi_image_pool.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/vi_image_pool.hpp \
+		$(GRANITE_POOL_TEST_OBJS)
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DGRANITE_VULKAN_MT -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
-		$< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+		$< $(GRANITE_POOL_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
-# The command ring alone, with a stand-in processor (tools/test_command_ring.cpp).
 COMMAND_RING_TEST_INC := -I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp -I$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan \
 	-I$(VIDEODIR_PARALLEL)/parallel-rdp/util -I$(VIDEODIR_PARALLEL)/parallel-rdp/volk \
 	-I$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan-headers/include -I$(LIBRETRO_COMM_DIR)/include
-test_command_ring$(EXE_EXT): tools/test_command_ring.cpp \
-		$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/command_ring.cpp \
-		$(VIDEODIR_PARALLEL)/parallel-rdp/util/thread_id.cpp \
-		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c
-	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include -c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c -o tools/test_command_ring_rthreads.o
-	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include -c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c -o tools/test_command_ring_ec.o
-	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DGRANITE_VULKAN_MT -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
-		tools/test_command_ring.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/command_ring.cpp \
-		$(VIDEODIR_PARALLEL)/parallel-rdp/util/thread_id.cpp tools/test_command_ring_rthreads.o tools/test_command_ring_ec.o \
-		-o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# The command ring alone, with a stand-in processor (tools/test_command_ring.c).
+COMMAND_RING_TEST_SRC := tools/test_command_ring.c $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/command_ring.c \
+	$(VIDEODIR_PARALLEL)/parallel-rdp/util/thread_id.c \
+	$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c
+test_command_ring$(EXE_EXT): $(COMMAND_RING_TEST_SRC)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's fence wait protocol, fence and semaphore pools and cookies (tools/test_vk_sync.c)
+VK_SYNC_TEST_SRC := tools/test_vk_sync.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/fence_wait.c \
+	$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/cookie.c \
+	$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c
+test_vk_sync$(EXE_EXT): $(VK_SYNC_TEST_SRC)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's per-frame garbage lists (tools/test_frame_garbage.c)
+test_frame_garbage$(EXE_EXT): tools/test_frame_garbage.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's release queue, from several threads (tools/test_release_queue.c)
+test_release_queue$(EXE_EXT): tools/test_release_queue.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/release_queue.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
 
 # GLideN64's RDRAM writeback converting read-back rows in place, against
 # the compacting copy it replaced
@@ -1712,8 +1771,8 @@ CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write
 	test_musyx_bounds$(EXE_EXT) test_musyx_aux$(EXE_EXT) test_alist_ops$(EXE_EXT) test_alist_abi1$(EXE_EXT) test_hle_dispatch$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT) \
 	test_mouse_accum$(EXE_EXT) test_hle_dram_wrap$(EXE_EXT) test_pif_write$(EXE_EXT) \
 	test_re2_fill$(EXE_EXT) test_temporal_upscaler$(EXE_EXT) test_pipeline_records$(EXE_EXT) test_rdp_x_range$(EXE_EXT) \
-	test_command_ring$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT) \
-	test_gliden64_write_rdram$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_vk_alloc_fallback$(EXE_EXT) \
+	test_command_ring$(EXE_EXT) test_vk_sync$(EXE_EXT) test_frame_garbage$(EXE_EXT) test_release_queue$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT) \
+	test_gliden64_write_rdram$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_granite_pool$(EXE_EXT) test_vk_alloc_fallback$(EXE_EXT) \
 	test_vi_image_pool$(EXE_EXT) test_incoherent_pages$(EXE_EXT)
 
 ifeq ($(HAVE_PARALLEL_RSP), 1)
@@ -1733,6 +1792,16 @@ check-core: $(CORE_CHECKS)
 # A header named by an existing .d file but since deleted is not an error:
 # the objects that included it just rebuild.
 %.h %.hpp:
+	@:
+
+# Nor is a source it names that was since removed or renamed (a .cpp
+# that became a .c): the object is rebuilt from the source there is. The
+# built-in rules that make a program from a source are dropped, so that
+# no missing file is ever "made" from such a source.
+%: %.c
+%: %.cpp
+%: %.o
+%.c %.cpp:
 	@:
 endif
 

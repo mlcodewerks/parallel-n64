@@ -46,7 +46,7 @@ typedef double GLdouble;
 #undef GL_DRAW_FRAMEBUFFER_BINDING
 #undef GL_COPY_READ_BUFFER_BINDING
 #undef GL_COPY_WRITE_BUFFER_BINDING
-#endif // HAVE_OPENGLES3
+#endif /* HAVE_OPENGLES3 */
 
 #if defined(HAVE_OPENGLES2)
 #define RARCH_GL_RENDERBUFFER GL_RENDERBUFFER
@@ -129,6 +129,22 @@ typedef struct glsm_ctx_params
 GLuint glsm_get_current_framebuffer(void);
 
 bool glsm_context_is_core(void);
+
+/* For renderers that draw straight on into the next frame after a swap:
+ * draw into a width x height target of the core's own from the next
+ * GLSM_CTL_STATE_BIND (0, 0: into the frontend's framebuffer); keep each
+ * frame finished with glsm_draw_target_present as the renderer swaps;
+ * after GLSM_CTL_STATE_UNBIND, glsm_draw_target_show puts the frame last
+ * finished in the frontend's framebuffer for this slice and returns
+ * whether there is one. */
+void glsm_draw_target(unsigned width, unsigned height);
+void glsm_draw_target_present(void);
+bool glsm_draw_target_show(void);
+
+/* While set, deleting GL objects does nothing: for tearing down a
+ * renderer whose context was lost, after GLSM_CTL_STATE_CONTEXT_RESET,
+ * where the names may be the new context's. */
+void glsm_abandon_objects(bool abandon);
 
 RETRO_END_DECLS
 

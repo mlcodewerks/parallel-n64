@@ -20,45 +20,31 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#ifndef GRANITE_ALIGNED_ALLOC_H
+#define GRANITE_ALIGNED_ALLOC_H
 
-#include <stdio.h>
-#include <stdint.h>
-#include "rdp_worker.h"
+#include <stddef.h>
+#include <retro_common_api.h>
 
-namespace Util
-{
-class TimelineTraceFile
-{
-public:
-	explicit TimelineTraceFile(const char *path);
-	~TimelineTraceFile();
+#if defined(__GNUC__) || defined(__clang__)
+#define GRANITE_MALLOC_ATTRS __attribute__((malloc, returns_nonnull, alloc_size(1)))
+#else
+#define GRANITE_MALLOC_ATTRS
+#endif
 
-	static void set_tid(const char *tid);
+RETRO_BEGIN_DECLS
 
-	// The link is first so the I/O thread can take an event straight off
-	// the worker queue.
-	struct Event : mpsc_stack_node_t
-	{
-		char desc[256];
-		char tid[32];
-		uint32_t pid;
-		uint64_t start_ns, end_ns;
+/* boundary is a power of two; NULL when out of memory */
+void *granite_memalign_alloc(size_t boundary, size_t size);
+void granite_memalign_free(void *ptr);
 
-		void set_desc(const char *desc);
-		void set_tid(const char *tid);
-	};
+/* What a new-expression's operator new does: never NULL, out of memory
+ * ends the program. Out of line, as operator new is, so a call site is a
+ * call and nothing else. */
+GRANITE_MALLOC_ATTRS void *granite_heap_new(size_t size);
+/* for types aligned past what malloc promises */
+GRANITE_MALLOC_ATTRS void *granite_heap_new_aligned(size_t size, size_t align);
 
-	Event *allocate_event();
-	void submit_event(Event *e);
+RETRO_END_DECLS
 
-private:
-	// Events are written out by one I/O thread (rdp_worker.c): any thread
-	// submits, no lock. Each event is its own allocation, freed by the
-	// I/O thread once written.
-	static void write_event(void *self, mpsc_stack_node_t *item);
-	rdp_worker_t *worker = nullptr;
-	FILE *file = nullptr;
-	uint64_t base_ts = 0;
-};
-}
+#endif

@@ -20,44 +20,40 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include "logging.hpp"
+#ifndef GRANITE_LOGGING_H
+#define GRANITE_LOGGING_H
+
+#include <stdio.h>
+#include <retro_common_api.h>
 
 #ifdef __LIBRETRO__
-#include <libretro_private.h>
-static char log_buf[1024];
-static bool log_helper(const char *tag, const char *fmt, va_list va)
-{
-	retro_log_level log_level = RETRO_LOG_INFO;
-	if (!strcmp(tag, "[WARN]: "))
-		log_level = RETRO_LOG_WARN;
-	else if (!strcmp(tag, "[ERROR]: "))
-		log_level = RETRO_LOG_ERROR;
+#include <libretro.h>
 
-	int rc = vsprintf(log_buf, fmt, va);
-	log_cb(log_level, "%s", log_buf);
-	return true;
-}
-#endif
+RETRO_BEGIN_DECLS
 
-namespace Util
-{
-static thread_local LoggingInterface *logging_iface;
+/* To the frontend's log, at its own level */
+void granite_log(enum retro_log_level level, const char *fmt, ...);
 
-bool interface_log(const char *tag, const char *fmt, ...)
-{
-#ifndef __LIBRETRO__
-	if (!logging_iface)
-		return false;
-#endif
+RETRO_END_DECLS
 
-	va_list va;
-	va_start(va, fmt);
-#ifdef __LIBRETRO__
-	bool ret = log_helper(tag, fmt, va);
+#define LOGE(...) granite_log(RETRO_LOG_ERROR, __VA_ARGS__)
+#define LOGW(...) granite_log(RETRO_LOG_WARN, __VA_ARGS__)
+#define LOGI(...) granite_log(RETRO_LOG_INFO, __VA_ARGS__)
+#elif defined(ANDROID)
+#include <android/log.h>
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "Granite", __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, "Granite", __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "Granite", __VA_ARGS__)
 #else
-	bool ret = logging_iface->log(tag, fmt, va);
+#define GRANITE_LOG_STDERR(tag, ...) \
+	do \
+	{ \
+		fprintf(stderr, tag __VA_ARGS__); \
+		fflush(stderr); \
+	} while (0)
+#define LOGE(...) GRANITE_LOG_STDERR("[ERROR]: ", __VA_ARGS__)
+#define LOGW(...) GRANITE_LOG_STDERR("[WARN]: ", __VA_ARGS__)
+#define LOGI(...) GRANITE_LOG_STDERR("[INFO]: ", __VA_ARGS__)
 #endif
-	va_end(va);
-	return ret;
-}
-}
+
+#endif

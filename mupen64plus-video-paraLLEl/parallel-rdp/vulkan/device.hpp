@@ -26,13 +26,14 @@
 #include "command_buffer.hpp"
 #include "command_pool.hpp"
 #include "fence.hpp"
-#include "fence_manager.hpp"
+#include "sync_pools.h"
+#include "frame_garbage.h"
+#include "release_queue.h"
 #include "image.hpp"
 #include "memory_allocator.hpp"
 #include "render_pass.hpp"
 #include "sampler.hpp"
 #include "semaphore.hpp"
-#include "semaphore_manager.hpp"
 #include "shader.hpp"
 #include "context.hpp"
 #include "query_pool.hpp"
@@ -47,11 +48,6 @@
 #endif
 
 #include "quirks.hpp"
-
-namespace Util
-{
-class TimelineTraceFile;
-}
 
 namespace Granite
 {
@@ -73,21 +69,12 @@ struct InitialImageBuffer
 	Util::SmallVector<VkBufferImageCopy, 32> blits;
 };
 
-// One object handed to the Device to release once the GPU is done with
-// the frame it was last used in (see Device::defer_release).
+// Memory handed to the Device to free once the GPU is done with the
+// frame it was last used in. Vulkan objects go through release_queue.c.
 struct DeferredRelease : mpsc_stack_node_t
 {
-	enum class Kind
-	{
-		Framebuffer, Sampler, Pipeline, ImageView, BufferView, Image, Buffer,
-		DescriptorPool, Semaphore, RecycleSemaphore, Fence, Memory, KeepAliveImage
-	};
-	Kind kind;
-	uint64_t handle = 0; // any non-dispatchable Vulkan handle
 	DeviceAllocation alloc = {};
-	ImageHandle image;
 };
-
 // A timeline-trace interval registered from a thread other than the
 // owner; recorded by the owner when the frame it was sent to begins.
 struct DeferredInterval : mpsc_stack_node_t
@@ -113,17 +100,18 @@ struct HandlePool
 	VulkanObjectPool<DeferredInterval> deferred_intervals;
 };
 
-class DebugChannelInterface
+// Where a debug channel's messages go: a function and what it is called on
+struct DebugChannelInterface
 {
-public:
 	union Word
 	{
 		uint32_t u32;
 		int32_t s32;
 		float f32;
 	};
-	virtual void message(const char *tag, uint32_t code, uint32_t x, uint32_t y, uint32_t z,
-	                     uint32_t word_count, const Word *words) = 0;
+	void (*message)(void *user, const char *tag, uint32_t code, uint32_t x, uint32_t y, uint32_t z,
+	                uint32_t word_count, const Word *words);
+	void *user;
 };
 
 namespace Helper
@@ -428,13 +416,6 @@ private:
 	QueueInfo queue_info;
 	unsigned num_thread_indices = 1;
 
-#ifdef GRANITE_VULKAN_MT
-	Util::AtomicU64 cookie;
-#else
-	uint64_t cookie = 0;
-#endif
-
-	uint64_t allocate_cookie();
 	void bake_program(Program &program);
 
 	void request_vertex_block(BufferBlock &block, VkDeviceSize size);
@@ -471,21 +452,26 @@ private:
 	// Make sure this is deleted last.
 	HandlePool handle_pool;
 
-	// Objects released from any thread without the device lock: each frame
-	// context drains its stack in PerFrame::begin(), after waiting for
-	// that frame's GPU work. A fixed array, so recreating the frame
-	// contexts never moves what a releasing thread is pushing onto.
+	// Released from any thread without a lock: Vulkan objects through
+	// release_queue.c, memory and timeline intervals on these stacks. Each
+	// frame context drains its own in PerFrame::begin(), after waiting for
+	// that frame's GPU work. Fixed arrays, so recreating the frame
+	// contexts never moves what a releasing thread is pushing onto. The
+	// queue's frame index says where all of them go.
 	struct PerFrame;
-	enum { MAX_DEFERRED_FRAMES = 16 };
+	enum { MAX_DEFERRED_FRAMES = GRANITE_RELEASE_FRAMES };
+	struct ReleaseQueue
+	{
+		granite_release_queue_t q;
+		ReleaseQueue() { granite_release_queue_init(&q); }
+		~ReleaseQueue() { granite_release_queue_free(&q); }
+	} releases;
 	mpsc_stack_t deferred_releases[MAX_DEFERRED_FRAMES];
 	mpsc_stack_t deferred_intervals[MAX_DEFERRED_FRAMES];
-	// The frame index releases go to: published only once a frame has
-	// begun, so nothing released for the new frame is drained by its own
-	// begin().
-	retro_atomic_int_t deferred_frame_index{0};
-	template <typename T>
-	void defer_release(DeferredRelease::Kind kind, T handle);
-	void defer_release_node(DeferredRelease *node);
+	void release_handle(granite_garbage_kind kind, uint64_t handle)
+	{
+		granite_release_queue_push(&releases.q, kind, handle);
+	}
 	void drain_deferred_releases(PerFrame &frame);
 
 	// Threads that find another thread already waiting on a FenceHolder
@@ -508,10 +494,16 @@ private:
 	struct Managers
 	{
 		DeviceAllocator memory;
-		FenceManager fence;
-		SemaphoreManager semaphore;
+		granite_fence_pool_t fence = {};
+		granite_semaphore_pool_t semaphore = {};
 		BufferPool vbo, ibo, ubo, staging;
 		TimestampIntervalManager timestamps;
+
+		~Managers()
+		{
+			granite_semaphore_pool_free(&semaphore);
+			granite_fence_pool_free(&fence);
+		}
 	};
 	Managers managers;
 
@@ -549,20 +541,11 @@ private:
 		Util::Vector<BufferBlock> staging_blocks;
 
 		Util::Vector<VkFence> wait_fences;
-		Util::Vector<VkFence> recycle_fences;
 
 		Util::Vector<DeviceAllocation> allocations;
-		Util::Vector<VkFramebuffer> destroyed_framebuffers;
-		Util::Vector<VkSampler> destroyed_samplers;
-		Util::Vector<VkPipeline> destroyed_pipelines;
-		Util::Vector<VkImageView> destroyed_image_views;
-		Util::Vector<VkBufferView> destroyed_buffer_views;
-		Util::Vector<VkImage> destroyed_images;
-		Util::Vector<VkBuffer> destroyed_buffers;
-		Util::Vector<VkDescriptorPool> destroyed_descriptor_pools;
 		Util::SmallVector<CommandBufferHandle> submissions[QUEUE_INDEX_COUNT];
-		Util::Vector<VkSemaphore> recycled_semaphores;
-		Util::Vector<VkSemaphore> destroyed_semaphores;
+		// destroyed, or recycled, by begin() (frame_garbage.c)
+		granite_frame_garbage_t garbage = {};
 		Util::Vector<ImageHandle> keep_alive_images;
 
 		struct DebugChannel

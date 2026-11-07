@@ -20,11 +20,17 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#pragma once
+#ifndef GRANITE_TIMER_H
+#define GRANITE_TIMER_H
 
 #include <stdint.h>
+#include <retro_common_api.h>
 
-namespace Util
-{
-int64_t get_current_time_nsecs();
-}
+RETRO_BEGIN_DECLS
+
+/* A monotonic clock, in nanoseconds; 0 if it cannot be read */
+int64_t granite_time_nsecs(void);
+
+RETRO_END_DECLS
+
+#endif
