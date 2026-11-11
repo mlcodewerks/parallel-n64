@@ -6,6 +6,7 @@
 #include <chrono>
 #include <string>
 #include "gSP.h"
+#include "gli_drawer.h"
 #include "TexrectDrawer.h"
 #include "Graphics/ObjectHandle.h"
 #include "Graphics/Parameters.h"
@@ -29,18 +30,11 @@ enum class DrawingState
 	TexRect = 4,
 };
 
-struct RectVertex
-{
-	float x, y, z, w;
-	float s0, t0, s1, t1;
-};
-
 typedef std::chrono::milliseconds Milliseconds;
 
 class GraphicsDrawer
 {
 public:
-	void addTriangle(int _v0, int _v1, int _v2);
 
 	void drawTriangles();
 
@@ -52,12 +46,8 @@ public:
 
 	void drawRect(int _ulx, int _uly, int _lrx, int _lry);
 
-	struct TexturedRectParams
+	struct TexturedRectParams : gli_texrect_params
 	{
-		float ulx, uly, lrx, lry;
-		float dsdx, dtdy;
-		s16 s, t;
-		bool flip, forceAjustScale, texrectCmd;
 		const FrameBuffer * pBuffer;
 		TexturedRectParams(float _ulx, float _uly, float _lrx, float _lry,
 			float _dsdx, float _dtdy,
@@ -65,39 +55,27 @@ public:
 			bool _flip, bool _forceAjustScale, bool _texrectCmd,
 			const FrameBuffer * _pBuffer
 			) :
-			ulx(_ulx), uly(_uly), lrx(_lrx), lry(_lry),
-			dsdx(_dsdx), dtdy(_dtdy),
-			s(_s), t(_t),
-			flip(_flip), forceAjustScale(_forceAjustScale), texrectCmd(_texrectCmd),
 			pBuffer(_pBuffer)
-		{}
-	private:
-		friend class GraphicsDrawer;
-		TexturedRectParams() :
-			ulx(0), uly(0), lrx(0), lry(0)
-		{};
+		{
+			ulx = _ulx; uly = _uly; lrx = _lrx; lry = _lry;
+			dsdx = _dsdx; dtdy = _dtdy;
+			s = _s; t = _t;
+			flip = _flip; forceAjustScale = _forceAjustScale; texrectCmd = _texrectCmd;
+		}
 	};
 
 	void correctTexturedRectParams(TexturedRectParams & _params);
 
 	void drawTexturedRect(const TexturedRectParams & _params);
 
-	struct CopyRectParams
+	struct CopyRectParams : gli_copy_rect
 	{
-		s32 srcX0 = 0;
-		s32 srcY0 = 0;
-		s32 srcX1;
-		s32 srcY1;
-		u32 srcWidth;
-		u32 srcHeight;
-		s32 dstX0 = 0;
-		s32 dstY0 = 0;
-		s32 dstX1;
-		s32 dstY1;
-		u32 dstWidth;
-		u32 dstHeight;
-		bool invertX = false;
-		bool invertY = false;
+		CopyRectParams()
+		{
+			srcX0 = srcY0 = 0;
+			dstX0 = dstY0 = 0;
+			invertX = invertY = 0;
+		}
 		typedef std::array<CachedTexture *, 2> Textures;
 		Textures tex = Textures{ { nullptr, nullptr } };
 		graphics::CombinerProgram * combiner = nullptr;
@@ -126,18 +104,16 @@ public:
 		return (triangles.vertices[_v0].clip & triangles.vertices[_v1].clip & triangles.vertices[_v2].clip) != 0;
 	}
 
-	bool isRejected(s32 _v0, s32 _v1, s32 _v2) const;
 
 	SPVertex & getVertex(u32 _v) { return triangles.vertices[_v]; }
 
 	SPVertex * getVertexPtr(u32 _v) { return triangles.vertices.data() + _v; }
 
-	void setDMAVerticesSize(u32 _size) { if (m_dmaVertices.size() < _size) m_dmaVertices.resize(_size); }
-
 	SPVertex * getDMAVerticesData() { return m_dmaVertices.data(); }
 
 	SPVertex & getCurrentDMAVertex();
 	u32 getDMAVerticesCount() const { return m_dmaVerticesNum; }
+	u32 getDMAVerticesCapacity() const { return (u32)m_dmaVertices.size(); }
 
 	void updateScissor(FrameBuffer * _pBuffer) const;
 
@@ -145,15 +121,16 @@ public:
 
 	void dropRenderState() { m_drawingState = DrawingState::Non; }
 
-	void flush() { m_texrectDrawer.draw(); }
+	void flush() { gli_texrect_draw(); }
 
-	bool isTexrectDrawerMode() const { return !m_texrectDrawer.isEmpty(); }
+	bool isTexrectDrawerMode() const { return !gli_texrect_is_empty(); }
 
 	void setBackgroundDrawingMode(bool _mode) { m_bBGMode = _mode; }
 
 private:
 	friend class DisplayWindow;
-	friend TexrectDrawer;
+	friend struct WindowGpu;
+	friend struct TexrectGpu;
 
 	GraphicsDrawer();
 	~GraphicsDrawer();
@@ -167,7 +144,6 @@ private:
 	void _setSpecialTexrect() const;
 
 	void _setBlendMode() const;
-	bool _setUnsupportedBlendMode() const;
 	void _updateCullFace() const;
 	void _updateViewport() const;
 	void _updateScreenCoordsViewport(const FrameBuffer * _pBuffer = nullptr) const;
@@ -177,10 +153,9 @@ private:
 	void _updateStates(DrawingState _drawingState) const;
 	void _prepareDrawTriangle();
 	bool _canDraw() const;
-	void _drawThickLine(u32 _v0, u32 _v1, float _width, u32 _flag);
 
 	DrawingState m_drawingState;
-	TexturedRectParams m_texrectParams;
+	f32 m_texrectRect[4]; /* the last texrect, ulx, uly, lrx, lry */
 
 	struct {
 		std::array<SPVertex, VERTBUFF_SIZE> vertices;
@@ -198,5 +173,4 @@ private:
 	f32 m_maxLineWidth;
 	bool m_bFlatColors;
 	bool m_bBGMode;
-	TexrectDrawer m_texrectDrawer;
 };

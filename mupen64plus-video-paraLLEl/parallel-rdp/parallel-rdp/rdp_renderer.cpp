@@ -28,6 +28,7 @@
 #include "bitops.hpp"
 #include "luts.hpp"
 #include "incoherent_pages.hpp"
+#include "pipeline_record_list.h"
 #include "timer.h"
 #include "thread_name.h"
 #include "shaders/slangmosh.hpp"
@@ -41,6 +42,9 @@ static size_t div_round_up(size_t a, size_t b)
 
 namespace
 {
+/* Never more than this many misses queued to the worker. */
+const unsigned MaxQueuedPipelines = 4 * Limits::MaxStaticRasterizationStates;
+
 struct PipelineNode : mpsc_stack_node_t
 {
 	Vulkan::DeferredPipelineCompile compile;
@@ -68,53 +72,9 @@ Renderer::~Renderer()
 	retro_atomic_store_release_int(&pipeline_ahead_stop, 1);
 	rdp_worker_free(pipeline_worker);
 	free(pipeline_ahead_nodes);
-	free(pending_async_pipelines.keys);
+	free(pipeline_nodes);
+	rdp_hash_set_free(&pending_async_pipelines);
 	free(incoherent.arena);
-}
-
-// Adds hash to the pipelines queued to the worker; false if it was there.
-bool Renderer::pending_async_pipeline_insert(Util::Hash hash)
-{
-	auto &set = pending_async_pipelines;
-	unsigned mask, i;
-
-	if (hash == 0)
-	{
-		bool had = set.has_zero;
-		set.has_zero = true;
-		return !had;
-	}
-
-	if (2 * (set.count + 1) > set.capacity)
-	{
-		unsigned capacity = set.capacity ? 2 * set.capacity : 64;
-		auto *keys = static_cast<Util::Hash *>(calloc(capacity, sizeof(Util::Hash)));
-		unsigned j;
-		if (!keys)
-			return true;
-		for (j = 0; j < set.capacity; j++)
-		{
-			Util::Hash k = set.keys[j];
-			if (k)
-			{
-				i = unsigned(k) & (capacity - 1);
-				while (keys[i])
-					i = (i + 1) & (capacity - 1);
-				keys[i] = k;
-			}
-		}
-		free(set.keys);
-		set.keys = keys;
-		set.capacity = capacity;
-	}
-
-	mask = set.capacity - 1;
-	for (i = unsigned(hash) & mask; set.keys[i]; i = (i + 1) & mask)
-		if (set.keys[i] == hash)
-			return false;
-	set.keys[i] = hash;
-	set.count++;
-	return true;
 }
 
 // maxStorageBufferRange; PARALLEL_RDP_MAX_STORAGE_BUFFER_RANGE=bytes lowers
@@ -201,6 +161,16 @@ bool Renderer::init_renderer(const RendererOptions &options)
 	if (!pipeline_worker)
 		return false;
 
+	/* All a pipeline miss needs, so that it allocates nothing mid-game. */
+	free(pipeline_nodes);
+	rdp_hash_set_free(&pending_async_pipelines);
+	rdp_hash_set_init(&pending_async_pipelines, PIPELINE_RECORD_LIST_MAX);
+	rdp_node_pool_init(&pipeline_node_pool);
+	auto *nodes = static_cast<PipelineNode *>(calloc(MaxQueuedPipelines, sizeof(PipelineNode)));
+	pipeline_nodes = nodes;
+	if (nodes)
+		for (unsigned i = 0; i < MaxQueuedPipelines; i++)
+			rdp_node_pool_release(&pipeline_node_pool, &nodes[i]);
 
 	for (auto &buffer : buffer_instances)
 		buffer.init(*device);
@@ -1842,6 +1812,14 @@ void Renderer::update_tmem_instances(Vulkan::CommandBuffer &cmd)
 	cmd.end_region();
 }
 
+void Renderer::set_span_setup_pipeline(Vulkan::CommandBuffer &cmd, bool upscale)
+{
+	cmd.set_program(shader_bank->span_setup);
+	cmd.set_specialization_constant_mask(3);
+	cmd.set_specialization_constant(0, (upscale ? caps.upscaling : 1) * ImplementationConstants::DefaultWorkgroupSize);
+	cmd.set_specialization_constant(1, upscale ? trailing_zeroes(caps.upscaling) : 0u);
+}
+
 void Renderer::submit_span_setup_jobs(Vulkan::CommandBuffer &cmd, bool upscale)
 {
 	cmd.begin_region("span-setup");
@@ -1851,12 +1829,8 @@ void Renderer::submit_span_setup_jobs(Vulkan::CommandBuffer &cmd, bool upscale)
 	cmd.set_storage_buffer(0, 2, *instance.gpu.scissor_setup.buffer);
 	cmd.set_storage_buffer(0, 3, *span_setups);
 
-	cmd.set_program(shader_bank->span_setup);
-
 	cmd.set_buffer_view(1, 0, *instance.gpu.span_info_jobs_view);
-	cmd.set_specialization_constant_mask(3);
-	cmd.set_specialization_constant(0, (upscale ? caps.upscaling : 1) * ImplementationConstants::DefaultWorkgroupSize);
-	cmd.set_specialization_constant(1, upscale ? trailing_zeroes(caps.upscaling) : 0u);
+	set_span_setup_pipeline(cmd, upscale);
 
 	Vulkan::QueryPoolHandle begin_ts, end_ts;
 	if (caps.timestamp >= 2)
@@ -1969,9 +1943,15 @@ void Renderer::submit_rasterization(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &
 		{
 			Vulkan::DeferredPipelineCompile compile;
 			cmd.extract_pipeline_state(compile);
-			if (pending_async_pipeline_insert(compile.hash))
+			/* (no node free: the next miss of this variant asks again) */
+			auto *node = static_cast<PipelineNode *>(rdp_node_pool_acquire(&pipeline_node_pool));
+			if (node && !rdp_hash_set_insert(&pending_async_pipelines, compile.hash))
 			{
-				auto *node = Util::create<PipelineNode>();
+				rdp_node_pool_release(&pipeline_node_pool, node);
+				node = nullptr;
+			}
+			if (node)
+			{
 				node->compile = rdp_move(compile);
 				node->kind = PIPELINE_RECORD_COMPUTE;
 				node->ahead = 0;
@@ -1993,6 +1973,34 @@ void Renderer::submit_rasterization(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &
 	cmd.end_region();
 }
 
+uint32_t Renderer::set_tile_binning_pipeline(Vulkan::CommandBuffer &cmd, bool upscale)
+{
+	uint32_t subgroup_size = device->get_device_features().subgroup_properties.subgroupSize;
+
+	cmd.set_specialization_constant_mask(0x7f);
+	cmd.set_specialization_constant(1, ImplementationConstants::TileWidth);
+	cmd.set_specialization_constant(2, ImplementationConstants::TileHeight);
+	cmd.set_specialization_constant(3, Limits::MaxPrimitives);
+	cmd.set_specialization_constant(4, upscale ? caps.max_width : Limits::MaxWidth);
+	cmd.set_specialization_constant(5, caps.max_num_tile_instances);
+	cmd.set_specialization_constant(6, upscale ? caps.upscaling : 1u);
+
+	cmd.set_program(shader_bank->tile_binning_combined);
+	if (caps.subgroup_tile_binning)
+	{
+		if (supports_subgroup_size_control(32, subgroup_size))
+		{
+			cmd.enable_subgroup_size_control(true);
+			cmd.set_subgroup_size_log2(true, 5, trailing_zeroes(subgroup_size));
+		}
+	}
+	else
+		subgroup_size = 32;
+
+	cmd.set_specialization_constant(0, subgroup_size);
+	return subgroup_size;
+}
+
 void Renderer::submit_tile_binning_combined(Vulkan::CommandBuffer &cmd, bool upscale)
 {
 	cmd.begin_region("tile-binning-combined");
@@ -2009,14 +2017,6 @@ void Renderer::submit_tile_binning_combined(Vulkan::CommandBuffer &cmd, bool ups
 		cmd.set_storage_buffer(0, 6, *indirect_dispatch_buffer);
 		cmd.set_storage_buffer(0, 7, *tile_work_list);
 	}
-
-	cmd.set_specialization_constant_mask(0x7f);
-	cmd.set_specialization_constant(1, ImplementationConstants::TileWidth);
-	cmd.set_specialization_constant(2, ImplementationConstants::TileHeight);
-	cmd.set_specialization_constant(3, Limits::MaxPrimitives);
-	cmd.set_specialization_constant(4, upscale ? caps.max_width : Limits::MaxWidth);
-	cmd.set_specialization_constant(5, caps.max_num_tile_instances);
-	cmd.set_specialization_constant(6, upscale ? caps.upscaling : 1u);
 
 	struct PushData
 	{
@@ -2037,31 +2037,12 @@ void Renderer::submit_tile_binning_combined(Vulkan::CommandBuffer &cmd, bool ups
 
 	cmd.push_constants(&push, 0, sizeof(push));
 
-	auto &features = device->get_device_features();
-	uint32_t subgroup_size = features.subgroup_properties.subgroupSize;
+	uint32_t subgroup_size = set_tile_binning_pipeline(cmd, upscale);
 
 	Vulkan::QueryPoolHandle start_ts, end_ts;
 	if (caps.timestamp >= 2)
 		start_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-	if (caps.subgroup_tile_binning)
-	{
-		cmd.set_program(shader_bank->tile_binning_combined);
-
-		if (supports_subgroup_size_control(32, subgroup_size))
-		{
-			cmd.enable_subgroup_size_control(true);
-			cmd.set_subgroup_size_log2(true, 5, trailing_zeroes(subgroup_size));
-		}
-	}
-	else
-	{
-		cmd.set_program(shader_bank->tile_binning_combined);
-
-		subgroup_size = 32;
-	}
-
-	cmd.set_specialization_constant(0, subgroup_size);
 	unsigned meta_tiles_x = 8;
 	unsigned meta_tiles_y = subgroup_size / meta_tiles_x;
 	unsigned num_tiles_x = (push.width + ImplementationConstants::TileWidth - 1) / ImplementationConstants::TileWidth;
@@ -2086,10 +2067,8 @@ void Renderer::submit_update_upscaled_domain_external(Vulkan::CommandBuffer &cmd
 	submit_update_upscaled_domain(cmd, ResolveStage::Pre, addr, addr, length, 1, pixel_size_log2);
 }
 
-void Renderer::submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, ResolveStage stage,
-                                             unsigned addr, unsigned depth_addr,
-                                             unsigned width, unsigned height,
-                                             unsigned pixel_size_log2)
+void Renderer::set_upscaled_domain_pipeline(Vulkan::CommandBuffer &cmd, ResolveStage stage,
+                                            unsigned pixel_size_log2, bool same_addr)
 {
 	if (stage == ResolveStage::Pre)
 		cmd.set_program(shader_bank->update_upscaled_domain_pre);
@@ -2098,6 +2077,24 @@ void Renderer::submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, Resolve
 	else
 		cmd.set_program(shader_bank->update_upscaled_domain_resolve);
 
+	cmd.set_specialization_constant_mask(0x7f);
+	cmd.set_specialization_constant(0, uint32_t(rdram_size));
+	cmd.set_specialization_constant(1, pixel_size_log2);
+	cmd.set_specialization_constant(2, int(same_addr));
+	cmd.set_specialization_constant(3, ImplementationConstants::DefaultWorkgroupSize);
+	cmd.set_specialization_constant(4, caps.upscaling * caps.upscaling);
+	if (stage == ResolveStage::SSAAResolve)
+	{
+		cmd.set_specialization_constant(5, uint32_t(caps.super_sample_readback_dither));
+		cmd.set_specialization_constant(6, uint32_t(!is_host_coherent));
+	}
+}
+
+void Renderer::submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, ResolveStage stage,
+                                             unsigned addr, unsigned depth_addr,
+                                             unsigned width, unsigned height,
+                                             unsigned pixel_size_log2)
+{
 	unsigned num_pixels = width * height;
 
 	if (stage != ResolveStage::SSAAResolve)
@@ -2117,17 +2114,7 @@ void Renderer::submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, Resolve
 	cmd.set_storage_buffer(0, 3, *upscaling_multisampled_rdram);
 	cmd.set_storage_buffer(0, 4, *upscaling_multisampled_hidden_rdram);
 
-	cmd.set_specialization_constant_mask(0x7f);
-	cmd.set_specialization_constant(0, uint32_t(rdram_size));
-	cmd.set_specialization_constant(1, pixel_size_log2);
-	cmd.set_specialization_constant(2, int(addr == depth_addr));
-	cmd.set_specialization_constant(3, ImplementationConstants::DefaultWorkgroupSize);
-	cmd.set_specialization_constant(4, caps.upscaling * caps.upscaling);
-	if (stage == ResolveStage::SSAAResolve)
-	{
-		cmd.set_specialization_constant(5, uint32_t(caps.super_sample_readback_dither));
-		cmd.set_specialization_constant(6, uint32_t(!is_host_coherent));
-	}
+	set_upscaled_domain_pipeline(cmd, stage, pixel_size_log2, addr == depth_addr);
 
 	uint32_t num_workgroups_x, num_workgroups_y;
 
@@ -2216,21 +2203,28 @@ void Renderer::submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, Resolve
 	                              fb.width, fb.deduced_height, pixel_size_log2);
 }
 
-void Renderer::submit_depth_blend(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &tmem, bool upscaled, bool force_write_mask)
+void Renderer::set_depth_blend_pipeline(Vulkan::CommandBuffer &cmd, uint32_t fmt, bool same_addr,
+                                        bool upscaled, bool force_write_mask)
 {
-	cmd.begin_region("render-pass");
-	auto &instance = buffer_instances[buffer_instance];
-
+	cmd.set_program(caps.ubershader ? shader_bank->ubershader : shader_bank->depth_blend);
 	cmd.set_specialization_constant_mask(0xff);
 	cmd.set_specialization_constant(0, uint32_t(rdram_size));
-	cmd.set_specialization_constant(1, uint32_t(fb.fmt));
-	cmd.set_specialization_constant(2, int(fb.addr == fb.depth_addr));
+	cmd.set_specialization_constant(1, fmt);
+	cmd.set_specialization_constant(2, int(same_addr));
 	cmd.set_specialization_constant(3, ImplementationConstants::TileWidth);
 	cmd.set_specialization_constant(4, ImplementationConstants::TileHeight);
 	cmd.set_specialization_constant(5, Limits::MaxPrimitives);
 	cmd.set_specialization_constant(6, upscaled ? caps.max_width : Limits::MaxWidth);
 	cmd.set_specialization_constant(7, uint32_t(force_write_mask || (!is_host_coherent && !upscaled)) |
 	                                   ((upscaled ? trailing_zeroes(caps.upscaling) : 0u) << 1u));
+}
+
+void Renderer::submit_depth_blend(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &tmem, bool upscaled, bool force_write_mask)
+{
+	cmd.begin_region("render-pass");
+	auto &instance = buffer_instances[buffer_instance];
+
+	set_depth_blend_pipeline(cmd, uint32_t(fb.fmt), fb.addr == fb.depth_addr, upscaled, force_write_mask);
 
 	if (upscaled)
 		cmd.set_storage_buffer(0, 0, *upscaling_multisampled_rdram);
@@ -2312,15 +2306,6 @@ void Renderer::submit_depth_blend(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &tm
 	unsigned num_primitives_32 = (stream.triangle_setup.size() + 31) / 32;
 	push.group_mask = (1u << num_primitives_32) - 1;
 	cmd.push_constants(&push, 0, sizeof(push));
-
-	if (caps.ubershader)
-	{
-		cmd.set_program(shader_bank->ubershader);
-	}
-	else
-	{
-		cmd.set_program(shader_bank->depth_blend);
-	}
 
 	Vulkan::QueryPoolHandle start_ts, end_ts;
 	if (caps.timestamp >= 2)
@@ -3782,18 +3767,136 @@ void Renderer::pipeline_work(void *user, mpsc_stack_node_t *item)
 	if (node->urgent)
 		retro_atomic_fetch_add_int(&renderer->pipeline_ahead_urgent_done, 1);
 	if (!node->ahead)
-		Util::destroy(node);
+		rdp_node_pool_release(&renderer->pipeline_node_pool, node);
 }
 
-void Renderer::build_pipelines_ahead(const pipeline_record_t *records, size_t count)
+/* The compute pipelines every frame can need, whose settings all follow from
+ * the renderer's own options: no draw has to build one, even on a first run.
+ * The specialised rasterizer variants are not here: the generic one covers
+ * them. Each uses the state setter its draw uses, so the two cannot differ. */
+void Renderer::add_known_pipeline(void *list_, Vulkan::CommandBuffer &cmd, uint32_t kind)
+{
+	auto *list = static_cast<KnownPipelines *>(list_);
+	auto *nodes = static_cast<PipelineNode *>(list->nodes);
+	PipelineNode *node = &nodes[list->n];
+	size_t i;
+
+	if (list->n >= list->limit)
+		return;
+	cmd.extract_pipeline_state(node->compile);
+	if (node->compile.program->get_pipeline(node->compile.hash).pipeline != VK_NULL_HANDLE)
+		return;
+	for (i = 0; i < list->n; i++)
+		if (nodes[i].kind == kind && nodes[i].compile.hash == node->compile.hash)
+			return;
+	node->kind   = kind;
+	node->ahead  = 1;
+	node->urgent = 1;
+	list->renderer->pipeline_ahead_urgent++;
+	list->n++;
+}
+
+size_t Renderer::queue_known_pipelines(void *nodes_, size_t n, VideoInterface *vi, bool with_upscaler)
+{
+	KnownPipelines list;
+	const bool can_upscale = caps.upscaling > 1;
+	auto cmd_handle = device->request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
+	auto &cmd = *cmd_handle;
+
+	list.nodes    = nodes_;
+	list.n        = n;
+	list.limit    = n + MaxKnownPipelines;
+	list.renderer = this;
+
+	const auto add = [&]() { add_known_pipeline(&list, cmd, PIPELINE_RECORD_COMPUTE); };
+
+	cmd.set_program(shader_bank->tmem_update);
+	cmd.set_specialization_constant_mask(1);
+	cmd.set_specialization_constant(0, ImplementationConstants::DefaultWorkgroupSize);
+	add();
+
+	cmd.set_program(shader_bank->clear_indirect_buffer);
+	cmd.set_specialization_constant_mask(1);
+	cmd.set_specialization_constant(0, ImplementationConstants::DefaultWorkgroupSize);
+	add();
+
+	for (unsigned upscaled = 0; upscaled < (can_upscale ? 2u : 1u); upscaled++)
+	{
+		set_span_setup_pipeline(cmd, upscaled != 0);
+		add();
+
+		set_tile_binning_pipeline(cmd, upscaled != 0);
+		add();
+		cmd.enable_subgroup_size_control(false);
+
+		if (!caps.ubershader)
+		{
+			cmd.set_program(shader_bank->rasterizer);
+			cmd.set_specialization_constant_mask(7);
+			cmd.set_specialization_constant(0, ImplementationConstants::TileWidth);
+			cmd.set_specialization_constant(1, ImplementationConstants::TileHeight);
+			cmd.set_specialization_constant(2, (upscaled ? trailing_zeroes(caps.upscaling) : 0u)
+			                                   << RASTERIZATION_UPSCALING_LOG2_BIT_OFFSET);
+			add();
+		}
+
+		for (uint32_t fmt = uint32_t(FBFormat::I4); fmt <= uint32_t(FBFormat::RGBA8888); fmt++)
+			for (unsigned same_addr = 0; same_addr < 2; same_addr++)
+			{
+				set_depth_blend_pipeline(cmd, fmt, same_addr != 0, upscaled != 0,
+				                         upscaled != 0 && caps.super_sample_readback);
+				add();
+			}
+	}
+
+	if (can_upscale)
+	{
+		static const ResolveStage stages[] = { ResolveStage::Pre, ResolveStage::Post, ResolveStage::SSAAResolve };
+		for (auto stage : stages)
+			for (unsigned pixel_size_log2 = 0; pixel_size_log2 <= 2; pixel_size_log2++)
+				for (unsigned same_addr = 0; same_addr < 2; same_addr++)
+				{
+					set_upscaled_domain_pipeline(cmd, stage, pixel_size_log2, same_addr != 0);
+					add();
+				}
+
+		cmd.set_program(shader_bank->clear_super_sampled_write_mask);
+		cmd.set_specialization_constant_mask(1);
+		cmd.set_specialization_constant(0, ImplementationConstants::DefaultWorkgroupSize);
+		add();
+	}
+
+	if (!is_host_coherent)
+	{
+		cmd.set_program(shader_bank->masked_rdram_resolve);
+		cmd.set_specialization_constant_mask(3);
+		cmd.set_specialization_constant(0, ImplementationConstants::IncoherentPageSize / 4);
+		cmd.set_specialization_constant(1, ImplementationConstants::IncoherentPageSize / 4);
+		add();
+
+		cmd.set_program(shader_bank->clear_write_mask);
+		cmd.set_specialization_constant_mask(3);
+		cmd.set_specialization_constant(0, ImplementationConstants::IncoherentPageSize / 4);
+		cmd.set_specialization_constant(1, ImplementationConstants::IncoherentPageSize / 4);
+		add();
+	}
+
+	device->submit(cmd_handle);
+
+	if (vi)
+		vi->queue_known_pipelines(caps.upscaling, with_upscaler, add_known_pipeline, &list);
+	return list.n;
+}
+
+void Renderer::build_pipelines_ahead(const pipeline_record_t *records, size_t count, VideoInterface *vi, bool with_upscaler)
 {
 	PipelineNode *nodes;
 	size_t i, n = 0;
 	unsigned pass;
 
-	if (!count || !pipeline_worker || pipeline_ahead_nodes)
+	if (!pipeline_worker || pipeline_ahead_nodes)
 		return;
-	if (!(nodes = static_cast<PipelineNode *>(calloc(count, sizeof(*nodes)))))
+	if (!(nodes = static_cast<PipelineNode *>(calloc(count + MaxKnownPipelines, sizeof(*nodes)))))
 		return;
 	pipeline_ahead_nodes = nodes;
 
@@ -3818,6 +3921,10 @@ void Renderer::build_pipelines_ahead(const pipeline_record_t *records, size_t co
 		pipeline_ahead_urgent += node->urgent;
 		n++;
 	}
+	/* tools/ci: frames do not depend on it, and a software driver takes most of
+	 * a minute over these */
+	if (!getenv("PARALLEL_RDP_NO_KNOWN_PIPELINES"))
+		n = queue_known_pipelines(nodes, n, vi, with_upscaler);
 	for (pass = 0; pass < 2; pass++)
 		for (i = 0; i < n; i++)
 			if (nodes[i].urgent == (pass == 0))

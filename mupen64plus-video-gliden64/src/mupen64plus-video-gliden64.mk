@@ -20,40 +20,50 @@ MY_LOCAL_C_INCLUDES :=                          \
 
 MY_LOCAL_SRC_FILES :=                                                              \
     $(SRCDIR)/Combiner.cpp                                                         \
-    $(SRCDIR)/CombinerKey.cpp                                                      \
-    $(SRCDIR)/CommonPluginAPI.cpp                                                  \
-    $(SRCDIR)/Config.cpp                                                           \
-    $(SRCDIR)/convert.cpp                                                          \
-    $(SRCDIR)/DepthBuffer.cpp                                                      \
-    $(SRCDIR)/DisplayWindow.cpp                                                    \
+    $(SRCDIR)/CombinerDecode.c                                                     \
+    $(SRCDIR)/TextureDecode.c                                                      \
+    $(SRCDIR)/TextureSizes.c                                                       \
+    $(SRCDIR)/TextureLRU.c                                                         \
+    $(SRCDIR)/VIUpdate.c                                                           \
+    $(SRCDIR)/FrameBufferRdram.c                                                   \
+    $(SRCDIR)/FrameBufferList.c                                                    \
+    $(SRCDIR)/TriangleList.c                                                       \
+    $(SRCDIR)/DrawerViewport.c                                                     \
+    $(SRCDIR)/DrawerStates.c                                                       \
+    $(SRCDIR)/DrawerRect.c                                                         \
+    $(SRCDIR)/TexrectSpecial.c                                                     \
+    $(SRCDIR)/BlendMode.c                                                          \
+    $(SRCDIR)/CombinerKey.c                                                       \
+    $(SRCDIR)/PluginAPI.c                                                        \
+    $(SRCDIR)/Config.c                                                            \
+    $(SRCDIR)/convert.c                                                          \
+    $(SRCDIR)/DepthBuffer.c                                                        \
+    $(SRCDIR)/DepthBufferGpu.cpp                                                   \
+    $(SRCDIR)/DisplayWindow.c                                                      \
+    $(SRCDIR)/DisplayWindowGpu.cpp                                                 \
     $(SRCDIR)/FrameBuffer.cpp                                                      \
-    $(SRCDIR)/FrameBufferInfo.cpp                                                  \
-    $(SRCDIR)/GBI.cpp                                                              \
-    $(SRCDIR)/gDP.cpp                                                              \
-    $(SRCDIR)/GLideN64.cpp                                                         \
+    $(SRCDIR)/FrameBufferInfo.c                                                   \
+    $(SRCDIR)/GBI.c                                                              \
+    $(SRCDIR)/gDP.c                                                              \
+    $(SRCDIR)/GLideN64.c                                                         \
     $(SRCDIR)/GraphicsDrawer.cpp                                                   \
-    $(SRCDIR)/gSP.cpp                                                              \
-    $(SRCDIR)/Log_android.cpp                                                      \
-    $(SRCDIR)/MupenPlusPluginAPI.cpp                                               \
-    $(SRCDIR)/N64.cpp                                                              \
-    $(SRCDIR)/NoiseTexture.cpp                                                     \
-    $(SRCDIR)/PaletteTexture.cpp                                                   \
-    $(SRCDIR)/PostProcessor.cpp                                                    \
-    $(SRCDIR)/RDP.cpp                                                              \
-    $(SRCDIR)/RSP.cpp                                                              \
-    $(SRCDIR)/SoftwareRender.cpp                                                   \
-    $(SRCDIR)/TexrectDrawer.cpp                                                    \
-    $(SRCDIR)/TextureFilterHandler.cpp                                             \
+    $(SRCDIR)/gSP.c                                                              \
+    $(SRCDIR)/N64.c                                                              \
+    $(SRCDIR)/NoiseTexture.c                                                       \
+    $(SRCDIR)/PaletteTexture.c                                                     \
+    $(SRCDIR)/PostProcessor.c                                                     \
+    $(SRCDIR)/RDP.c                                                              \
+    $(SRCDIR)/RSP.c                                                              \
+    $(SRCDIR)/SoftwareRender.c                                                   \
+    $(SRCDIR)/TexrectDrawer.c                                                      \
+    $(SRCDIR)/TexrectDrawerGpu.cpp                                                    \
+    $(SRCDIR)/TextureFilterHandler.c                                              \
     $(SRCDIR)/Textures.cpp                                                         \
-    $(SRCDIR)/VI.cpp                                                               \
-    $(SRCDIR)/ZlutTexture.cpp                                                      \
-    $(SRCDIR)/common/CommonAPIImpl_common.cpp                                      \
-    $(SRCDIR)/mupenplus/CommonAPIImpl_mupenplus.cpp                                \
-    $(SRCDIR)/mupenplus/Config_mupenplus.cpp                                       \
-    $(SRCDIR)/mupenplus/MemoryStatus_mupenplus.cpp                                 \
-    $(SRCDIR)/mupenplus/MupenPlusAPIImpl.cpp                                       \
-    $(SRCDIR)/DepthBufferRender/ClipPolygon.cpp                                    \
-    $(SRCDIR)/DepthBufferRender/DepthBufferRender.cpp                              \
+    $(SRCDIR)/VI.c                                                               \
+    $(SRCDIR)/ZlutTexture.c                                                        \
+    $(SRCDIR)/mupenplus/Config_mupenplus.c                                       \
+    $(SRCDIR)/DepthBufferRender/ClipPolygon.c                                    \
+    $(SRCDIR)/DepthBufferRender/DepthBufferRender.c                              \
     $(SRCDIR)/BufferCopy/ColorBufferToRDRAM.cpp                                    \
     $(SRCDIR)/BufferCopy/DepthBufferToRDRAM.cpp                                    \
     $(SRCDIR)/BufferCopy/RDRAMtoColorBuffer.cpp                                    \
@@ -69,7 +79,6 @@ MY_LOCAL_SRC_FILES :=                                                           
     $(SRCDIR)/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp \
     $(SRCDIR)/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp   \
     $(SRCDIR)/Graphics/OpenGLContext/opengl_ColorBufferReaderWithReadPixels.cpp    \
-    $(SRCDIR)/Graphics/OpenGLContext/opengl_ColorBufferReaderWithEGLImage.cpp      \
     $(SRCDIR)/Graphics/OpenGLContext/opengl_ContextImpl.cpp                        \
     $(SRCDIR)/Graphics/OpenGLContext/opengl_GLInfo.cpp                             \
     $(SRCDIR)/Graphics/OpenGLContext/opengl_Parameters.cpp                         \
@@ -84,37 +93,33 @@ MY_LOCAL_SRC_FILES :=                                                           
     $(SRCDIR)/Graphics/OpenGLContext/GLSL/glsl_ShaderStorage.cpp                   \
     $(SRCDIR)/Graphics/OpenGLContext/GLSL/glsl_SpecialShadersFactory.cpp           \
     $(SRCDIR)/Graphics/OpenGLContext/GLSL/glsl_Utils.cpp                           \
-    $(SRCDIR)/Graphics/OpenGLContext/mupen64plus/mupen64plus_DisplayWindow.cpp     \
-    $(SRCDIR)/Graphics/OpenGLContext/GraphicBuffer/PrivateApi/GraphicBuffer.cpp    \
-    $(SRCDIR)/Graphics/OpenGLContext/GraphicBuffer/PrivateApi/libhardware.cpp      \
-    $(SRCDIR)/Graphics/OpenGLContext/GraphicBuffer/PublicApi/android_hardware_buffer_compat.cpp     \
-    $(SRCDIR)/Graphics/OpenGLContext/GraphicBuffer/GraphicBufferWrapper.cpp        \
-    $(SRCDIR)/uCodes/F3D.cpp                                                       \
-    $(SRCDIR)/uCodes/F3DAM.cpp                                                     \
-    $(SRCDIR)/uCodes/F3DBETA.cpp                                                   \
-    $(SRCDIR)/uCodes/F3DDKR.cpp                                                    \
-    $(SRCDIR)/uCodes/F3DEX.cpp                                                     \
-    $(SRCDIR)/uCodes/F3DEX2.cpp                                                    \
-    $(SRCDIR)/uCodes/F3DEX2ACCLAIM.cpp                                             \
-    $(SRCDIR)/uCodes/F3DEX2CBFD.cpp                                                \
-    $(SRCDIR)/uCodes/F3DZEX2.cpp                                                   \
-    $(SRCDIR)/uCodes/F3DFLX2.cpp                                                   \
-    $(SRCDIR)/uCodes/F3DGOLDEN.cpp                                                 \
-    $(SRCDIR)/uCodes/F3DPD.cpp                                                     \
-    $(SRCDIR)/uCodes/F3DSETA.cpp                                                   \
-    $(SRCDIR)/uCodes/F5Indi_Naboo.cpp                                              \
-    $(SRCDIR)/uCodes/F5Rogue.cpp                                                    \
-    $(SRCDIR)/uCodes/F3DTEXA.cpp                                                   \
-    $(SRCDIR)/uCodes/L3D.cpp                                                       \
-    $(SRCDIR)/uCodes/L3DEX2.cpp                                                    \
-    $(SRCDIR)/uCodes/L3DEX.cpp                                                     \
-    $(SRCDIR)/uCodes/S2DEX2.cpp                                                    \
-    $(SRCDIR)/uCodes/S2DEX.cpp                                                     \
-    $(SRCDIR)/uCodes/T3DUX.cpp                                                     \
-    $(SRCDIR)/uCodes/Turbo3D.cpp                                                   \
-    $(SRCDIR)/uCodes/ZSort.cpp                                                     \
-    $(SRCDIR)/uCodes/ZSortBOSS.cpp                                                 \
-    $(SRCDIR)/xxHash/xxhash.c                                                      \
+    $(SRCDIR)/uCodes/F3D.c                                                       \
+    $(SRCDIR)/uCodes/F3DAM.c                                                     \
+    $(SRCDIR)/uCodes/F3DBETA.c                                                   \
+    $(SRCDIR)/uCodes/F3DDKR.c                                                    \
+    $(SRCDIR)/uCodes/F3DEX.c                                                     \
+    $(SRCDIR)/uCodes/F3DEX2.c                                                    \
+    $(SRCDIR)/uCodes/F3DEX2ACCLAIM.c                                             \
+    $(SRCDIR)/uCodes/F3DEX2CBFD.c                                                \
+    $(SRCDIR)/uCodes/F3DZEX2.c                                                   \
+    $(SRCDIR)/uCodes/F3DFLX2.c                                                   \
+    $(SRCDIR)/uCodes/F3DGOLDEN.c                                                 \
+    $(SRCDIR)/uCodes/F3DPD.c                                                     \
+    $(SRCDIR)/uCodes/F3DSETA.c                                                   \
+    $(SRCDIR)/uCodes/F5Indi_Naboo.c                                              \
+    $(SRCDIR)/uCodes/F5Rogue.c                                                    \
+    $(SRCDIR)/uCodes/F3DTEXA.c                                                   \
+    $(SRCDIR)/uCodes/L3D.c                                                       \
+    $(SRCDIR)/uCodes/L3DEX2.c                                                    \
+    $(SRCDIR)/uCodes/L3DEX.c                                                     \
+    $(SRCDIR)/uCodes/S2DEX2.c                                                    \
+    $(SRCDIR)/uCodes/S2DEX_gfx.cpp \
+    $(SRCDIR)/uCodes/S2DEX.c                                                     \
+    $(SRCDIR)/uCodes/T3DUX.c                                                     \
+    $(SRCDIR)/uCodes/Turbo3D.c                                                   \
+    $(SRCDIR)/uCodes/ZSort.c                                                     \
+    $(SRCDIR)/uCodes/ZSortBOSS.c                                                 \
+    $(SRCDIR)/CRC_OPT.c \
 
 MY_LOCAL_CFLAGS :=          \
     $(COMMON_CFLAGS)        \
@@ -139,7 +144,6 @@ ifeq ($(TARGET_ARCH_ABI), armeabi-v7a)
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/3DMathNeon.cpp
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/gSPNeon.cpp
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/RSP_LoadMatrixNeon.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/CRC_OPT_NEON.cpp
     MY_LOCAL_CFLAGS += -D__NEON_OPT
     MY_LOCAL_CFLAGS += -D__VEC4_OPT -mfpu=neon
 
@@ -148,23 +152,20 @@ else ifeq ($(TARGET_ARCH_ABI), arm64-v8a)
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/3DMathNeon.cpp
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/gSPNeon.cpp
     MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/RSP_LoadMatrixNeon.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/Neon/CRC_OPT_NEON.cpp
     MY_LOCAL_CFLAGS += -D__NEON_OPT
     MY_LOCAL_CFLAGS += -D__VEC4_OPT -mfpu=neon
 
 else ifeq ($(TARGET_ARCH_ABI), x86)
 #    MY_LOCAL_CFLAGS += -DX86_ASM
     MY_LOCAL_CFLAGS += -D__VEC4_OPT
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/3DMath.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/RSP_LoadMatrix.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/CRC_OPT.cpp
+    MY_LOCAL_SRC_FILES += $(SRCDIR)/3DMath.c
+    MY_LOCAL_SRC_FILES += $(SRCDIR)/RSP_LoadMatrix.c
 
 else ifeq ($(TARGET_ARCH_ABI), x86_64)
 #    MY_LOCAL_CFLAGS += -DX86_ASM
     MY_LOCAL_CFLAGS += -D__VEC4_OPT
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/3DMath.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/RSP_LoadMatrix.cpp
-    MY_LOCAL_SRC_FILES += $(SRCDIR)/CRC_OPT.cpp
+    MY_LOCAL_SRC_FILES += $(SRCDIR)/3DMath.c
+    MY_LOCAL_SRC_FILES += $(SRCDIR)/RSP_LoadMatrix.c
 endif
 
 ###########

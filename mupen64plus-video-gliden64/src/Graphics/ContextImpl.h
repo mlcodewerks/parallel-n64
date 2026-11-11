@@ -31,6 +31,8 @@ namespace graphics {
 		virtual void deleteTexture(ObjectHandle _name) = 0;
 		virtual void init2DTexture(const Context::InitTextureParams & _params) = 0;
 		virtual void update2DTexture(const Context::UpdateTextureDataParams & _params) = 0;
+		/* Memory to decode a texture straight into, handed back as its data. */
+		virtual void * lendTextureData(size_t) { return nullptr; }
 		virtual void setTextureParameters(const Context::TexParameters & _parameters) = 0;
 		virtual void bindTexture(const Context::BindTextureParameters & _params) = 0;
 		virtual void setTextureUnpackAlignment(s32 _param) = 0;
@@ -52,10 +54,15 @@ namespace graphics {
 		virtual PixelReadBuffer * createPixelReadBuffer(size_t _sizeInBytes) = 0;
 		virtual ColorBufferReader * createColorBufferReader(CachedTexture * _pTexture) = 0;
 		virtual bool isCombinerProgramBuilderObsolete() = 0;
+		virtual bool isCombinerUberOnly() { return false; }
 		virtual void resetCombinerProgramBuilder() = 0;
 		virtual CombinerProgram * createCombinerProgram(Combiner & _color, Combiner & _alpha, const CombinerKey & _key) = 0;
+
+		virtual CombinerProgram * createCombinerProgramAsync(Combiner & _color, Combiner & _alpha, const CombinerKey & _key) = 0;
 		virtual bool saveShadersStorage(const Combiners & _combiners) = 0;
 		virtual bool loadShadersStorage(Combiners & _combiners) = 0;
+
+		virtual std::string getCombinerJournalPath(u32 & _version) = 0;
 		virtual ShaderProgram * createDepthFogShader() = 0;
 		virtual TexrectDrawerShaderProgram * createTexrectDrawerDrawShader() = 0;
 		virtual ShaderProgram * createTexrectDrawerClearShader() = 0;

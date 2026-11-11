@@ -1,3 +1,5 @@
+#include <string>
+#include <stdlib.h>
 #include <fstream>
 #include <functional>
 #include <cstring>
@@ -5,6 +7,7 @@
 #include <osal_files.h>
 
 #include "Combiner.h"
+#include "CombinerKeyJournal.h"
 #include "gDP.h"
 #include "Config.h"
 #include "PluginAPI.h"
@@ -12,64 +15,6 @@
 #include "Graphics/Context.h"
 
 using namespace graphics;
-
-static u32 saRGBExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0,			G_GCI_TEXEL1,			G_GCI_PRIMITIVE,
-	G_GCI_SHADE,			G_GCI_ENVIRONMENT,		G_GCI_ONE,				G_GCI_NOISE,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO
-};
-
-static u32 sbRGBExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0,			G_GCI_TEXEL1,			G_GCI_PRIMITIVE,
-	G_GCI_SHADE,			G_GCI_ENVIRONMENT,		G_GCI_CENTER,			G_GCI_K4,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO
-};
-
-static u32 mRGBExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0,			G_GCI_TEXEL1,			G_GCI_PRIMITIVE,
-	G_GCI_SHADE,			G_GCI_ENVIRONMENT,		G_GCI_SCALE,			G_GCI_COMBINED_ALPHA,
-	G_GCI_TEXEL0_ALPHA,		G_GCI_TEXEL1_ALPHA,		G_GCI_PRIMITIVE_ALPHA,	G_GCI_SHADE_ALPHA,
-	G_GCI_ENV_ALPHA,		G_GCI_LOD_FRACTION,		G_GCI_PRIM_LOD_FRAC,	G_GCI_K5,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,
-	G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO,				G_GCI_ZERO
-};
-
-static u32 aRGBExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0,			G_GCI_TEXEL1,			G_GCI_PRIMITIVE,
-	G_GCI_SHADE,			G_GCI_ENVIRONMENT,		G_GCI_ONE,				G_GCI_ZERO
-};
-
-static u32 saAExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0_ALPHA,		G_GCI_TEXEL1_ALPHA,		G_GCI_PRIMITIVE_ALPHA,
-	G_GCI_SHADE_ALPHA,		G_GCI_ENV_ALPHA,		G_GCI_ONE,				G_GCI_ZERO
-};
-
-static u32 sbAExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0_ALPHA,		G_GCI_TEXEL1_ALPHA,		G_GCI_PRIMITIVE_ALPHA,
-	G_GCI_SHADE_ALPHA,		G_GCI_ENV_ALPHA,		G_GCI_ONE,				G_GCI_ZERO
-};
-
-static u32 mAExpanded[] =
-{
-	G_GCI_LOD_FRACTION,		G_GCI_TEXEL0_ALPHA,		G_GCI_TEXEL1_ALPHA,		G_GCI_PRIMITIVE_ALPHA,
-	G_GCI_SHADE_ALPHA,		G_GCI_ENV_ALPHA,		G_GCI_PRIM_LOD_FRAC,	G_GCI_ZERO,
-};
-
-static u32 aAExpanded[] =
-{
-	G_GCI_COMBINED,			G_GCI_TEXEL0_ALPHA,		G_GCI_TEXEL1_ALPHA,		G_GCI_PRIMITIVE_ALPHA,
-	G_GCI_SHADE_ALPHA,		G_GCI_ENV_ALPHA,		G_GCI_ONE,				G_GCI_ZERO
-};
 
 void Combiner_Init() {
 	CombinerInfo & cmbInfo = CombinerInfo::get();
@@ -101,13 +46,10 @@ void CombinerInfo::init()
 		m_combiners.clear();
 	}
 
-	if (m_combiners.empty()) {
-		setPolygonMode(DrawingState::TexRect);
-		gDP.otherMode.cycleType = G_CYC_COPY;
-		setCombine(EncodeCombineMode(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0));
-		gDP.otherMode.cycleType = G_CYC_FILL;
-		setCombine(EncodeCombineMode(0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE));
-	}
+	_buildFixedKeys();
+
+	if (config.generalEmulation.enableShadersStorage != 0)
+		_openKeysJournal();
 
 	m_shadowmapProgram.reset(gfxContext.createDepthFogShader());
 	m_texrectCopyProgram.reset(gfxContext.createTexrectCopyShader());
@@ -120,225 +62,38 @@ void CombinerInfo::destroy()
 
 	m_pCurrent = nullptr;
 	if (config.generalEmulation.enableShadersStorage != 0)
-		_saveShadersStorage();
+		_closeKeysJournal(_saveShadersStorage());
 	m_shadersLoaded = 0;
 	for (auto cur = m_combiners.begin(); cur != m_combiners.end(); ++cur)
 		delete cur->second;
 	m_combiners.clear();
 }
 
-static
-void SimplifyCycle( CombineCycle *cc, CombinerStage *stage )
+graphics::CombinerProgram * Combiner_Compile(CombinerKey key, bool _mayDefer)
 {
-	// Load the first operand
-	stage->op[0].op = LOAD;
-	stage->op[0].param1 = cc->sa;
-	stage->numOps = 1;
-
-	// If we're just subtracting zero, skip it
-	if (cc->sb != G_GCI_ZERO) {
-		// Subtracting a number from itself is zero
-		if (cc->sb == stage->op[0].param1)
-			stage->op[0].param1 = G_GCI_ZERO;
-		else {
-			stage->op[1].op = SUB;
-			stage->op[1].param1 = cc->sb;
-			stage->numOps++;
-		}
-	}
-
-	// If we either subtracted, or didn't load a zero
-	if ((stage->numOps > 1) || (stage->op[0].param1 != G_GCI_ZERO)) {
-		// Multiplying by zero is zero
-		if (cc->m == G_GCI_ZERO) {
-			stage->numOps = 1;
-			stage->op[0].op = LOAD;
-			stage->op[0].param1 = G_GCI_ZERO;
-		} else {
-			// Multiplying by one, so just do a load
-			if ((stage->numOps == 1) && (stage->op[0].param1 == G_GCI_ONE))
-				stage->op[0].param1 = cc->m;
-			else {
-				stage->op[stage->numOps].op = MUL;
-				stage->op[stage->numOps].param1 = cc->m;
-				stage->numOps++;
-			}
-		}
-	}
-
-	// Don't bother adding zero
-	if (cc->a != G_GCI_ZERO) {
-		// If all we have so far is zero, then load this instead
-		if ((stage->numOps == 1) && (stage->op[0].param1 == G_GCI_ZERO))
-			stage->op[0].param1 = cc->a;
-		else {
-			stage->op[stage->numOps].op = ADD;
-			stage->op[stage->numOps].param1 = cc->a;
-			stage->numOps++;
-		}
-	}
-
-	// Handle interpolation
-	if ((stage->numOps == 4) && (stage->op[1].param1 == stage->op[3].param1)) {
-		stage->numOps = 1;
-		stage->op[0].op = INTER;
-		stage->op[0].param2 = stage->op[1].param1;
-		stage->op[0].param3 = stage->op[2].param1;
-	}
-}
-
-graphics::CombinerProgram * Combiner_Compile(CombinerKey key)
-{
-	gDPCombine combine;
-
-	combine.mux = key.getMux();
-
 	Combiner color, alpha;
+	gli_combiner_decode(key.getMux(), key.getCycleType(), &color, &alpha);
 
-	const u32 cycleType = key.getCycleType();
-	const u32 numCycles = cycleType + 1;
-	color.numStages = numCycles;
-	alpha.numStages = numCycles;
-
-	CombineCycle cc[2];
-	CombineCycle ac[2];
-
-	// Simplify each RDP combiner cycle into a combiner stage
-	if (cycleType == G_CYC_1CYCLE) {
-		// 1 cycle mode uses combiner equations from 2nd cycle
-		u32 colorMux[4] = { saRGBExpanded[combine.saRGB1], sbRGBExpanded[combine.sbRGB1],
-							mRGBExpanded[combine.mRGB1], aRGBExpanded[combine.aRGB1] };
-		// Check for 'combined' mux
-		for (u32 i = 0; i < 4; ++i) {
-			if (colorMux[i] == G_GCI_COMBINED || colorMux[i] == G_GCI_COMBINED_ALPHA)
-				colorMux[i] = G_GCI_ZERO;
-		}
-		cc[1].sa = colorMux[0];
-		cc[1].sb = colorMux[1];
-		cc[1].m = colorMux[2];
-		cc[1].a = colorMux[3];
-		SimplifyCycle(&cc[1], &color.stage[0]);
-
-		u32 alphaMux[4] = { saAExpanded[combine.saA1], sbAExpanded[combine.sbA1],
-			mAExpanded[combine.mA1], aAExpanded[combine.aA1] };
-		// Check for 'combined' mux
-		for (u32 i = 0; i < 4; ++i) {
-			if (alphaMux[i] == G_GCI_COMBINED)
-				alphaMux[i] = G_GCI_ZERO;
-		}
-		ac[1].sa = alphaMux[0];
-		ac[1].sb = alphaMux[1];
-		ac[1].m = alphaMux[2];
-		ac[1].a = alphaMux[3];
-		SimplifyCycle(&ac[1], &alpha.stage[0]);
-	} else {
-		// Decode and expand the combine mode into a more general form
-		cc[1].sa = saRGBExpanded[combine.saRGB1];
-		cc[1].sb = sbRGBExpanded[combine.sbRGB1];
-		cc[1].m = mRGBExpanded[combine.mRGB1];
-		cc[1].a = aRGBExpanded[combine.aRGB1];
-		ac[1].sa = saAExpanded[combine.saA1];
-		ac[1].sb = sbAExpanded[combine.sbA1];
-		ac[1].m = mAExpanded[combine.mA1];
-		ac[1].a = aAExpanded[combine.aA1];
-
-		cc[0].sa = saRGBExpanded[combine.saRGB0];
-		cc[0].sb = sbRGBExpanded[combine.sbRGB0];
-		cc[0].m = mRGBExpanded[combine.mRGB0];
-		cc[0].a = aRGBExpanded[combine.aRGB0];
-		ac[0].sa = saAExpanded[combine.saA0];
-		ac[0].sb = sbAExpanded[combine.sbA0];
-		ac[0].m = mAExpanded[combine.mA0];
-		ac[0].a = aAExpanded[combine.aA0];
-
-		SimplifyCycle(&cc[0], &color.stage[0]);
-		SimplifyCycle(&ac[0], &alpha.stage[0]);
-
-		const bool equalStages = (memcmp(cc, cc + 1, sizeof(CombineCycle)) | memcmp(ac, ac + 1, sizeof(CombineCycle))) == 0;
-		if (!equalStages) {
-			SimplifyCycle(&cc[1], &color.stage[1]);
-			SimplifyCycle(&ac[1], &alpha.stage[1]);
-		} else {
-			color.numStages = 1;
-			alpha.numStages = 1;
-		}
+	if (_mayDefer) {
+		// The builder corrects the stages in place: on copies, for what may still compile below.
+		Combiner deferredColor = color, deferredAlpha = alpha;
+		graphics::CombinerProgram * program = gfxContext.createCombinerProgramAsync(deferredColor, deferredAlpha, key);
+		if (program != nullptr)
+			return program;
+		static const bool strict = getenv("GLIDEN64_GL_STRICT") != nullptr;
+		if (strict)
+			abort();
 	}
 
 	return gfxContext.createCombinerProgram(color, alpha, key);
 }
 
-extern "C" uint32_t LegacySm64ToolsHacks;
 void CombinerInfo::update()
 {
 	// TODO: find, why gDP.changed & CHANGED_COMBINE not always works (e.g. Mario Tennis).
 	// if (gDP.changed & CHANGED_COMBINE)
 	{
-		if (gDP.otherMode.cycleType == G_CYC_COPY)
-		{
-			setCombine(EncodeCombineMode(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0));
-		}
-		else if (gDP.otherMode.cycleType == G_CYC_FILL)
-		{
-			setCombine(EncodeCombineMode(0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE));
-		}
-		else
-		{
-			if (LegacySm64ToolsHacks)
-			{
-				// This is sanity check of provided combiner - 1st and 2nd cycle must be equal
-				if (gDP.otherMode.cycleType == G_CYC_1CYCLE)
-				{
-#define FIX_COMBINE(val) gDP.combine.val##1 = gDP.combine.val##0
-					FIX_COMBINE(aA);
-					FIX_COMBINE(aRGB);
-					FIX_COMBINE(mA);
-					FIX_COMBINE(mRGB);
-					FIX_COMBINE(saA);
-					FIX_COMBINE(saRGB);
-					FIX_COMBINE(sbA);
-					FIX_COMBINE(sbRGB);
-#undef FIX_COMBINE
-				}
-
-				// This forces COMBINED usage for 2nd mode and assumes no magic is happening in 2nd cycle
-				// Some magic may happen in the 2CYCLE mode, do not force anything
-				if (gDP.otherMode.cycleType == G_CYC_2CYCLE)
-				{
-					if (gDP.combine.aRGB0  == gDP.combine.aRGB1
-					 && gDP.combine.mRGB0  == gDP.combine.mRGB1
-					 && gDP.combine.saRGB0 == gDP.combine.saRGB1
-					 && gDP.combine.sbRGB0 == gDP.combine.sbRGB1
-						)
-					{
-						gDP.combine.aA1 = G_CCMUX_COMBINED;
-						gDP.combine.aRGB1 = G_CCMUX_COMBINED;
-						/* G_CCMUX_0 = 31 is the all-bits-set encoding of
-						 * "zero source" in the N64 RDP combiner. Each sub-
-						 * mux has its own bit width and reads "zero" as
-						 * its own all-bits-set value: 3-bit fields use 7,
-						 * 4-bit fields use 15, 5-bit fields use 31. Mask
-						 * to the field width to document the truncation
-						 * and silence -Woverflow. */
-						gDP.combine.mA1 = G_CCMUX_0 & 0x7;
-						gDP.combine.mRGB1 = G_CCMUX_0;
-						gDP.combine.saA1 = G_CCMUX_0 & 0x7;
-						gDP.combine.saRGB1 = G_CCMUX_0 & 0xF;
-						gDP.combine.sbA1 = G_CCMUX_0 & 0x7;
-						gDP.combine.sbRGB1 = G_CCMUX_0 & 0xF;
-					}
-				}
-			}
-			setCombine(gDP.combine.mux);
-		}
-		gDP.changed &= ~CHANGED_COMBINE;
-
-
-		if (gDP.otherMode.cycleType == G_CYC_COPY)
-			setCombine(EncodeCombineMode(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0));
-		else if (gDP.otherMode.cycleType == G_CYC_FILL)
-			setCombine(EncodeCombineMode(0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE));
-		else
-			setCombine(gDP.combine.mux);
+		setCombine(gli_combiner_mux());
 		gDP.changed &= ~CHANGED_COMBINE;
 	}
 }
@@ -354,9 +109,10 @@ void CombinerInfo::setCombine(u64 _mux )
 	if (iter != m_combiners.end()) {
 		m_pCurrent = iter->second;
 	} else {
-		m_pCurrent = Combiner_Compile(key);
+		m_pCurrent = Combiner_Compile(key, true);
 		m_pCurrent->update(true);
 		m_combiners[m_pCurrent->getKey()] = m_pCurrent;
+		combiner_journal_push(m_journal, m_pCurrent->getKey().getMux(), gli_GBI_hwlSupported ? 1 : 0);
 	}
 	m_bChanged = true;
 }
@@ -397,12 +153,76 @@ void CombinerInfo::setPolygonMode(DrawingState _drawingState)
 	}
 }
 
-void CombinerInfo::_saveShadersStorage() const
+bool CombinerInfo::_saveShadersStorage() const
 {
 	if (m_shadersLoaded >= m_combiners.size())
-		return;
+		return true;
 
-	gfxContext.saveShadersStorage(m_combiners);
+	return gfxContext.saveShadersStorage(m_combiners);
+}
+
+/* Copy and fill modes use one combine each, so every key they can make is
+ * known: build them all here rather than when a game first draws one. */
+void CombinerInfo::_buildFixedKeys()
+{
+	static const u64 muxes[2][2] = {
+		{ G_CYC_COPY, EncodeCombineMode(0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0, 0, 0, 0, TEXEL0) },
+		{ G_CYC_FILL, EncodeCombineMode(0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE, 0, 0, 0, SHADE) }
+	};
+	const bool hwl = gli_GBI_hwlSupported;
+	for (u32 mode = 0; mode < 2; ++mode)
+		for (u32 bits = 0; bits < 16; ++bits) {
+			/* bits: rect, two of bilerp, hardware lighting */
+			const u32 flags = (bits & 1) | (static_cast<u32>(muxes[mode][0]) << 1) | ((bits & 6) << 2) | ((bits & 8) << 2);
+			gDPCombine combine;
+			combine.mux = muxes[mode][1];
+			combine.muxs0 |= flags << 24;
+			const CombinerKey key(combine.mux, false);
+			if (m_combiners.find(key) != m_combiners.end())
+				continue;
+			gli_GBI_hwlSupported = (bits & 8) != 0;
+			graphics::CombinerProgram * pCombiner = Combiner_Compile(key);
+			pCombiner->update(true);
+			m_combiners[pCombiner->getKey()] = pCombiner;
+		}
+	gli_GBI_hwlSupported = hwl;
+}
+
+void CombinerInfo::_journalKey(void * _ctx, uint64_t _key, unsigned _hwl)
+{
+	CombinerInfo * info = static_cast<CombinerInfo *>(_ctx);
+	const CombinerKey key(_key, false);
+	if (info->m_combiners.find(key) != info->m_combiners.end())
+		return;
+	const bool hwl = gli_GBI_hwlSupported;
+	gli_GBI_hwlSupported = _hwl != 0;
+	graphics::CombinerProgram * pCombiner = Combiner_Compile(key);
+	pCombiner->update(true);
+	info->m_combiners[pCombiner->getKey()] = pCombiner;
+	gli_GBI_hwlSupported = hwl;
+}
+
+/* Keys a session that crashed wrote down are built now, at load, and are
+ * in what this session saves: m_shadersLoaded does not count them. */
+void CombinerInfo::_openKeysJournal()
+{
+	u32 version = 0;
+	const std::string path = gfxContext.getCombinerJournalPath(version);
+	combiner_journal_read(path.c_str(), version, _journalKey, this);
+	m_journal = combiner_journal_open(path.c_str(), version);
+}
+
+void CombinerInfo::_closeKeysJournal(bool _saved)
+{
+	u32 version = 0;
+	combiner_journal_close(m_journal);
+	m_journal = nullptr;
+	/* An ubershader-only driver has no program of these keys to save: the
+	 * journal is how the next load builds them. */
+	if (_saved && !gfxContext.isCombinerUberOnly()) {
+		const std::string path = gfxContext.getCombinerJournalPath(version);
+		combiner_journal_remove(path.c_str());
+	}
 }
 
 bool CombinerInfo::_loadShadersStorage()
@@ -413,4 +233,9 @@ bool CombinerInfo::_loadShadersStorage()
 	}
 
 	return false;
+}
+
+bool gli_combiner_is_rect_mode(void)
+{
+	return CombinerInfo::get().isRectMode();
 }

@@ -995,6 +995,9 @@ ifneq (,$(findstring msvc,$(platform)))
    CPUOPTS += -O2
 else ifeq ($(platform), emscripten)
    CPUOPTS += -O3
+else ifneq ($(SANITIZER),)
+	# what a sanitizer finds does not need -Ofast, and -Ofast takes far longer
+	CPUOPTS += -O1
 else
 	CPUOPTS += -Ofast
 endif
@@ -1222,7 +1225,7 @@ clean: clean-tools
 	rm -f $(OBJECTS) $(TARGET) $(OBJECTS:.o=.d) .build-flags
 
 clean-tools:
-	rm -f $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) lrhost_gl$(EXE_EXT) $(GLITCH64_TESTS) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) dd_ipl_hle_test$(EXE_EXT) \
+	rm -f test_gliden64_spirv$(EXE_EXT) $(ANGRYLION_TOOLS) lrhost$(EXE_EXT) lrhost_vk$(EXE_EXT) lrhost_gl$(EXE_EXT) $(GLITCH64_TESTS) angrylion_replay$(EXE_EXT) $(ANGRYLION_CHECKS) dd_ipl_hle_test$(EXE_EXT) \
 		$(CORE_CHECKS) dynarec_long_block_test$(EXE_EXT) savestate_latch_test$(EXE_EXT) savestate_code_test$(EXE_EXT) cpu_fallback_test$(EXE_EXT) tools/test_prsp_dmem_wrap.o tools/test_granite_util_rthreads.o $(GRANITE_POOL_TEST_OBJS)
 
 # Angrylion benchmark and bit-exactness harnesses (tools/angrylion_*.c),
@@ -1264,10 +1267,11 @@ lrhost_gl$(EXE_EXT): tools/lrhost.c tools/lrhost_gl.h $(LIBRETRO_COMM_DIR)/featu
 # write, and its texture uploads for desktop GL and for GLES 2
 GLITCH64_TEST_SRCS := $(VIDEODIR_GLIDE)/Glitch64/glitchmain.c $(VIDEODIR_GLIDE)/Glitch64/glitch64_combiner.c \
 	$(VIDEODIR_GLIDE)/Glitch64/geometry.c $(VIDEODIR_GLIDE)/Glitch64/glitch64_textures.c \
-	$(ROOT_DIR)/libretro/glsm/glsm.c $(LIBRETRO_COMM_DIR)/gfx/gl_capabilities.c $(LIBRETRO_COMM_DIR)/glsym/rglgen.c
+	$(ROOT_DIR)/libretro/glsm/glsm.c $(LIBRETRO_COMM_DIR)/gfx/gl_capabilities.c $(LIBRETRO_COMM_DIR)/glsym/rglgen.c \
+	tools/glitch64_test_stubs.c
 GLITCH64_TEST_FLAGS := -D__LIBRETRO__ -DINLINE=inline -DM64P_PLUGIN_API -DM64P_CORE_PROTOTYPES -DHAVE_GLIDE64 \
 	-I$(VIDEODIR_GLIDE)/Glitch64/inc -I$(ROOT_DIR)/include -I$(ROOT_DIR)/libretro -I$(LIBRETRO_COMM_DIR)/include \
-	-I$(CORE_DIR)/src -I$(CORE_DIR)/src/api $(filter -fsanitize=% -O% -g,$(CFLAGS)) -w
+	-I$(CORE_DIR)/src -I$(CORE_DIR)/src/api -I$(CORE_DIR)/custom $(filter -fsanitize=% -O% -g,$(CFLAGS)) -w
 GLITCH64_GL_FLAGS := -DHAVE_OPENGL -DENABLE_3POINT
 GLITCH64_GLES_FLAGS := -DHAVE_OPENGLES -DHAVE_OPENGLES2 -DDISABLE_3POINT
 test_glitch64_lfb_write$(EXE_EXT): tools/test_glitch64_lfb_write.c $(GLITCH64_TEST_SRCS)
@@ -1745,6 +1749,22 @@ test_frame_garbage$(EXE_EXT): tools/test_frame_garbage.c $(VIDEODIR_PARALLEL)/pa
 		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
+# GLideN64's combiner key journal, from a thread (tools/test_combiner_journal.c)
+COMBINER_JOURNAL_TEST_SRC := $(VIDEODIR_GLIDEN64)/src/CombinerKeyJournal.c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c \
+	$(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c $(LIBRETRO_COMM_DIR)/streams/file_stream.c \
+	$(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c $(LIBRETRO_COMM_DIR)/string/stdstring.c \
+	$(LIBRETRO_COMM_DIR)/compat/compat_strl.c $(LIBRETRO_COMM_DIR)/file/file_path.c \
+	$(LIBRETRO_COMM_DIR)/file/file_path_io.c $(LIBRETRO_COMM_DIR)/time/rtime.c \
+	$(LIBRETRO_COMM_DIR)/encodings/encoding_utf.c $(LIBRETRO_COMM_DIR)/compat/fopen_utf8.c \
+	$(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c $(LIBRETRO_COMM_DIR)/features/features_cpu.c
+test_combiner_journal$(EXE_EXT): tools/test_combiner_journal.c $(COMBINER_JOURNAL_TEST_SRC) $(VIDEODIR_GLIDEN64)/src/CombinerKeyJournal.h
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_GLIDEN64)/src -I$(LIBRETRO_COMM_DIR)/include tools/test_combiner_journal.c $(COMBINER_JOURNAL_TEST_SRC) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# What a parallel-rdp pipeline miss uses, allocated up front
+test_pipeline_pending$(EXE_EXT): tools/test_pipeline_pending.c $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/pipeline_pending.h \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) tools/test_pipeline_pending.c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
 # Granite's release queue, from several threads (tools/test_release_queue.c)
 test_release_queue$(EXE_EXT): tools/test_release_queue.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/release_queue.c \
 		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c \
@@ -1763,6 +1783,28 @@ test_gliden64_deferred_readback$(EXE_EXT): tools/test_gliden64_deferred_readback
 test_glide64_fb_readback$(EXE_EXT): tools/test_glide64_fb_readback.c $(VIDEODIR_GLIDE)/Glide64/FBReadback.h Graphics/image_convert.h
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(LIBRETRO_COMM_DIR)/include $< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
+# GLideN64 is moving to C89 a file at a time: what has moved stays there
+GLIDEN64_C89 := N64.c convert.c RSP_LoadMatrix.c 3DMath.c CRC32.c RDP.c CRC_OPT.c GLideN64.c SoftwareRender.c DepthBufferRender/ClipPolygon.c DepthBufferRender/DepthBufferRender.c \
+	gDP.c VI.c RSP.c GBI.c gSP.c TexrectDrawer.c FrameBufferInfo.c ZlutTexture.c PaletteTexture.c NoiseTexture.c StereoFrames.c TextureFilterHandler.c PostProcessor.c Config.c CombinerKey.c PluginAPI.c DisplayWindow.c DepthBuffer.c CombinerDecode.c TextureDecode.c TextureSizes.c TextureLRU.c VIUpdate.c FrameBufferRdram.c FrameBufferList.c TriangleList.c DrawerViewport.c DrawerStates.c DrawerRect.c TexrectSpecial.c BlendMode.c mupenplus/Config_mupenplus.c uCodes/F5Rogue.c uCodes/F5Indi_Naboo.c \
+	uCodes/S2DEX.c \
+	uCodes/ZSort.c uCodes/ZSortBOSS.c \
+	uCodes/T3DUX.c uCodes/Turbo3D.c \
+	uCodes/F3DEX2.c uCodes/F3DEX2ACCLAIM.c uCodes/F3DFLX2.c uCodes/L3D.c uCodes/L3DEX.c uCodes/L3DEX2.c uCodes/F3DEX3.c \
+	uCodes/F3DEX095.c uCodes/F3DZEX2.c uCodes/F3DPD.c uCodes/F3DTEXA.c uCodes/F3DGOLDEN.c uCodes/S2DEX2.c uCodes/F3DBETA.c uCodes/F3DAM.c uCodes/F3DEX.c uCodes/F3DSETA.c uCodes/F3DDKR.c uCodes/F3DEX2CBFD.c uCodes/F3D.c \
+	Graphics/VulkanContext/vk_spirv.c Graphics/VulkanContext/vk_shaders.c \
+	Graphics/VulkanContext/vk_renderer.c Graphics/VulkanContext/vk_device.c
+check_gliden64_c89:
+	@if grep -rn "pragma GCC diagnostic" $(VIDEODIR_GLIDEN64)/src --include=*.h --include=*.c --exclude-dir=inc; then echo "no diagnostic pragmas: they turn this check off"; exit 1; fi
+	for f in $(GLIDEN64_C89); do $(CC) -std=c89 -pedantic -Wno-long-long -Werror=pedantic -Werror=declaration-after-statement \
+		-Werror=implicit-function-declaration -Werror=implicit-int -Werror=strict-prototypes -D_DEFAULT_SOURCE \
+		-isystem $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan-headers/include -isystem mupen64plus-core/src/api -isystem $(LIBRETRO_COMM_DIR)/include \
+		-I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp -I$(VIDEODIR_GLIDEN64)/src -I$(VIDEODIR_GLIDEN64)/src/uCodes -I$(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext \
+		-fsyntax-only $(VIDEODIR_GLIDEN64)/src/$$f || exit 1; done
+
+GLIDEN64_SPIRV_SRC := $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_spirv.c $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_shaders.c
+test_gliden64_spirv$(EXE_EXT): tools/test_gliden64_spirv.c $(GLIDEN64_SPIRV_SRC)
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext $< $(GLIDEN64_SPIRV_SRC) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
 test_gliden64_ring_segments$(EXE_EXT): tools/test_gliden64_ring_segments.cpp $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_RingSegments.h
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_GLIDEN64)/src $< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
@@ -1770,9 +1812,9 @@ CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write
 	test_cp0_exceptions$(EXE_EXT) test_r4300_interp$(EXE_EXT) test_fpu_compare$(EXE_EXT) test_pi_status$(EXE_EXT) \
 	test_musyx_bounds$(EXE_EXT) test_musyx_aux$(EXE_EXT) test_alist_ops$(EXE_EXT) test_alist_abi1$(EXE_EXT) test_hle_dispatch$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT) \
 	test_mouse_accum$(EXE_EXT) test_hle_dram_wrap$(EXE_EXT) test_pif_write$(EXE_EXT) \
-	test_re2_fill$(EXE_EXT) test_temporal_upscaler$(EXE_EXT) test_pipeline_records$(EXE_EXT) test_rdp_x_range$(EXE_EXT) \
+	test_re2_fill$(EXE_EXT) test_temporal_upscaler$(EXE_EXT) test_pipeline_records$(EXE_EXT) test_pipeline_pending$(EXE_EXT) test_rdp_x_range$(EXE_EXT) \
 	test_command_ring$(EXE_EXT) test_vk_sync$(EXE_EXT) test_frame_garbage$(EXE_EXT) test_release_queue$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT) \
-	test_gliden64_write_rdram$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_granite_pool$(EXE_EXT) test_vk_alloc_fallback$(EXE_EXT) \
+	test_combiner_journal$(EXE_EXT) test_gliden64_write_rdram$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_granite_pool$(EXE_EXT) test_vk_alloc_fallback$(EXE_EXT) \
 	test_vi_image_pool$(EXE_EXT) test_incoherent_pages$(EXE_EXT)
 
 ifeq ($(HAVE_PARALLEL_RSP), 1)

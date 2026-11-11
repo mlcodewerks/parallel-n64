@@ -14,45 +14,60 @@ option(VERO4K "Set to ON if targeting a Vero4k" ${VERO4K})
 project( GLideN64 )
 
 set(GLideN64_SOURCES
-  3DMath.cpp
+  3DMath.c
   Combiner.cpp
-  CombinerKey.cpp
-  CommonPluginAPI.cpp
-  Config.cpp
-  convert.cpp
-  CRC32.cpp
-  DepthBuffer.cpp
-  DisplayWindow.cpp
+  CombinerDecode.c
+  TextureDecode.c
+  TextureSizes.c
+  TextureLRU.c
+  VIUpdate.c
+  FrameBufferRdram.c
+  FrameBufferList.c
+  TriangleList.c
+  DrawerViewport.c
+  DrawerStates.c
+  DrawerRect.c
+  TexrectSpecial.c
+  BlendMode.c
+  CombinerKey.c
+  PluginAPI.c
+  Config.c
+  convert.c
+  CRC32.c
+  DepthBuffer.c
+  DepthBufferGpu.cpp
+  DisplayWindow.c
+  DisplayWindowGpu.cpp
   FrameBuffer.cpp
-  FrameBufferInfo.cpp
-  GBI.cpp
-  gDP.cpp
-  GLideN64.cpp
+  FrameBufferInfo.c
+  GBI.c
+  gDP.c
+  GLideN64.c
   GraphicsDrawer.cpp
-  gSP.cpp
-  Log.cpp
-  N64.cpp
-  NoiseTexture.cpp
-  PaletteTexture.cpp
-  PostProcessor.cpp
-  RDP.cpp
-  RSP.cpp
-  RSP_LoadMatrix.cpp
-  SoftwareRender.cpp
-  TexrectDrawer.cpp
-  TextureFilterHandler.cpp
+  gSP.c
+  N64.c
+  NoiseTexture.c
+  PaletteTexture.c
+  PostProcessor.c
+  RDP.c
+  RSP.c
+  RSP_LoadMatrix.c
+  SoftwareRender.c
+  TexrectDrawer.c
+  TexrectDrawerGpu.cpp
+  TextureFilterHandler.c
   Textures.cpp
-  VI.cpp
-  ZlutTexture.cpp
+  VI.c
+  ZlutTexture.c
   BufferCopy/ColorBufferToRDRAM.cpp
   BufferCopy/DepthBufferToRDRAM.cpp
   BufferCopy/RDRAMtoColorBuffer.cpp
-  DepthBufferRender/ClipPolygon.cpp
-  DepthBufferRender/DepthBufferRender.cpp
-  common/CommonAPIImpl_common.cpp
+  DepthBufferRender/ClipPolygon.c
+  DepthBufferRender/DepthBufferRender.c
   Graphics/Context.cpp
   Graphics/ColorBufferReader.cpp
   Graphics/CombinerProgram.cpp
+  Graphics/CombinerValues.cpp
   Graphics/ObjectHandle.cpp
   Graphics/OpenGLContext/GLFunctions.cpp
   Graphics/OpenGLContext/opengl_Attributes.cpp
@@ -76,31 +91,32 @@ set(GLideN64_SOURCES
   Graphics/OpenGLContext/GLSL/glsl_ShaderStorage.cpp
   Graphics/OpenGLContext/GLSL/glsl_SpecialShadersFactory.cpp
   Graphics/OpenGLContext/GLSL/glsl_Utils.cpp
-  uCodes/F3D.cpp
-  uCodes/F3DBETA.cpp
-  uCodes/F3DDKR.cpp
-  uCodes/F3DEX.cpp
-  uCodes/F3DAM.cpp
-  uCodes/F3DEX2.cpp
-  uCodes/F3DEX2ACCLAIM.cpp
-  uCodes/F3DEX2CBFD.cpp
-  uCodes/F3DZEX2.cpp
-  uCodes/F3DFLX2.cpp
-  uCodes/F3DGOLDEN.cpp
-  uCodes/F3DTEXA.cpp
-  uCodes/F3DPD.cpp
-  uCodes/F3DSETA.cpp
-  uCodes/F5Indi_Naboo.cpp
-  uCodes/F5Rogue.cpp
-  uCodes/L3D.cpp
-  uCodes/L3DEX2.cpp
-  uCodes/L3DEX.cpp
-  uCodes/S2DEX2.cpp
-  uCodes/S2DEX.cpp
-  uCodes/T3DUX.cpp
-  uCodes/Turbo3D.cpp
-  uCodes/ZSort.cpp
-  uCodes/ZSortBOSS.cpp
+  uCodes/F3D.c
+  uCodes/F3DBETA.c
+  uCodes/F3DDKR.c
+  uCodes/F3DEX.c
+  uCodes/F3DAM.c
+  uCodes/F3DEX2.c
+  uCodes/F3DEX2ACCLAIM.c
+  uCodes/F3DEX2CBFD.c
+  uCodes/F3DZEX2.c
+  uCodes/F3DFLX2.c
+  uCodes/F3DGOLDEN.c
+  uCodes/F3DTEXA.c
+  uCodes/F3DPD.c
+  uCodes/F3DSETA.c
+  uCodes/F5Indi_Naboo.c
+  uCodes/F5Rogue.c
+  uCodes/L3D.c
+  uCodes/L3DEX2.c
+  uCodes/L3DEX.c
+  uCodes/S2DEX2.c
+  uCodes/S2DEX.c
+    uCodes/S2DEX_gfx.cpp
+  uCodes/T3DUX.c
+  uCodes/Turbo3D.c
+  uCodes/ZSort.c
+  uCodes/ZSortBOSS.c
 )
 
 #check if we're running on Raspberry Pi
@@ -133,12 +149,7 @@ if(MUPENPLUSAPI)
   )
   include_directories( . inc )
   set(GLideN64_SOURCES_UNIX
-	MupenPlusPluginAPI.cpp
-	mupenplus/Config_mupenplus.cpp
-	mupenplus/CommonAPIImpl_mupenplus.cpp
-	mupenplus/MemoryStatus_mupenplus.cpp
-	mupenplus/MupenPlusAPIImpl.cpp
-	Graphics/OpenGLContext/mupen64plus/mupen64plus_DisplayWindow.cpp
+	mupenplus/Config_mupenplus.c
   )
 
   set(GLideN64_SOURCES_WIN ${GLideN64_SOURCES_UNIX}
@@ -246,11 +257,10 @@ endif(VEC4_OPT)
 
 if(CRC_OPT)
   list(REMOVE_ITEM GLideN64_SOURCES
-        CRC32.cpp
+        CRC32.c
   )
   list(APPEND GLideN64_SOURCES
-        CRC_OPT.cpp
-        xxHash/xxhash.c
+        CRC_OPT.c
   )
 endif(CRC_OPT)
 
@@ -264,8 +274,8 @@ if(NEON_OPT)
     Neon/RSP_LoadMatrixNeon.cpp
   )
   list(REMOVE_ITEM GLideN64_SOURCES
-    3DMath.cpp
-    RSP_LoadMatrix.cpp
+    3DMath.c
+    RSP_LoadMatrix.c
   )
 endif(NEON_OPT)
 
@@ -274,7 +284,7 @@ if(X86_OPT)
     RSP_LoadMatrixX86.cpp
   )
   list(REMOVE_ITEM GLideN64_SOURCES
-    RSP_LoadMatrix.cpp
+    RSP_LoadMatrix.c
   )
 endif(X86_OPT)
 

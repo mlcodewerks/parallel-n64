@@ -5,18 +5,23 @@
 #include <vector>
 
 #include "Types.h"
+#include "gli_vi_update.h"
+#include "gli_fb_rdram.h"
+#include "gli_fb_list.h"
 #include "Textures.h"
 #include "Graphics/ObjectHandle.h"
 
 struct gDPTile;
 struct DepthBuffer;
 
-const int fingerprint[4] = { 2, 6, 4, 3 };
 
-struct FrameBuffer
+struct FrameBuffer : gli_fb
 {
 	FrameBuffer();
 	~FrameBuffer();
+	/* owns its RDRAM copy */
+	FrameBuffer(const FrameBuffer &) = delete;
+	FrameBuffer & operator=(const FrameBuffer &) = delete;
 	void init(u32 _address, u16 _format, u16 _size, u16 _width, bool _cfb);
 	void updateEndAddress();
 	void resolveMultisampledTexture(bool _bForce = false);
@@ -28,32 +33,6 @@ struct FrameBuffer
 	bool isValid(bool _forceCheck) const;
 	bool isAuxiliary() const;
 
-	u32 m_startAddress;
-	u32 m_endAddress;
-	u32 m_size;
-	u32 m_width;
-	u32 m_height;
-	u32 m_originX;
-	u32 m_originY;
-	u32 m_swapCount;
-	float m_scale;
-	bool m_copiedToRdram;
-	bool m_fingerprint;
-	bool m_cleared;
-	bool m_changed;
-	bool m_cfb;
-	bool m_isDepthBuffer;
-	bool m_isPauseScreen;
-	bool m_isOBScreen;
-	bool m_isMainBuffer;
-	bool m_readable;
-	bool m_copied;
-
-	struct {
-		u32 uls, ult;
-	} m_loadTileOrigin;
-	u32 m_loadType;
-
 	graphics::ObjectHandle m_FBO;
 	CachedTexture *m_pTexture;
 	DepthBuffer *m_pDepthBuffer;
@@ -61,7 +40,6 @@ struct FrameBuffer
 	// multisampling
 	graphics::ObjectHandle m_resolveFBO;
 	CachedTexture *m_pResolveTexture;
-	bool m_resolved;
 
 	// subtexture
 	graphics::ObjectHandle m_SubFBO;
@@ -71,17 +49,8 @@ struct FrameBuffer
 	graphics::ObjectHandle m_copyFBO;
 	CachedTexture * m_pFrameBufferCopyTexture;
 
-	std::vector<u8> m_RdramCopy;
 
 private:
-	struct {
-		u32 fillcolor = 0;
-		s32 ulx = 0;
-		s32 uly = 0;
-		s32 lrx = 0;
-		s32 lry = 0;
-	} m_clearParams;
-
 	void _initTexture(u16 _width, u16 _height, u16 _format, u16 _size, CachedTexture *_pTexture);
 	void _setAndAttachTexture(graphics::ObjectHandle _fbo, CachedTexture *_pTexture, u32 _t, bool _multisampling);
 	bool _initSubTexture(u32 _t);
@@ -89,7 +58,6 @@ private:
 	CachedTexture * _copyFrameBufferTexture();
 	CachedTexture * _getSubTexture(u32 _t);
 
-	mutable u32 m_validityChecked;
 };
 
 class FrameBufferList
@@ -125,7 +93,7 @@ public:
 	static FrameBufferList & get();
 
 private:
-	FrameBufferList() : m_pCurrent(nullptr), m_pCopy(nullptr), m_prevColorImageHeight(0) {}
+	FrameBufferList() : m_pCurrent(nullptr), m_pCopy(nullptr), m_prevColorImageHeight(0) { gli_fb_list_init(&m_fbs); }
 	FrameBufferList(const FrameBufferList &) = delete;
 
 	void removeIntersections();
@@ -165,46 +133,22 @@ private:
 		CachedTexture *m_pTexture = nullptr;
 	};
 
-	typedef std::list<FrameBuffer> FrameBuffers;
-	FrameBuffers m_list;
+	/* the buffers live in fixed slots, built in place; the C list keeps
+	 * their order */
+	gli_fb_list m_fbs;
+	alignas(FrameBuffer) unsigned char m_storage[GLI_FB_MAX][sizeof(FrameBuffer)];
+	FrameBuffer * _slot(u32 _slot) { return reinterpret_cast<FrameBuffer *>(m_storage[_slot]); }
+	FrameBuffer * _at(u32 _pos) { return _slot(gli_fb_list_at(&m_fbs, _pos)); }
+	FrameBuffer & _addFront();
+	/* destroys the buffers taken out of the list, forgetting the current one */
+	void _destroyRemoved(const u8 * _removed, u32 _count);
 	FrameBuffer * m_pCurrent;
 	FrameBuffer * m_pCopy;
 	u32 m_prevColorImageHeight;
 	OverscanBuffer m_overscan;
 
-	struct RdpUpdateResult {
-		u32 vi_vres;
-		u32 vi_hres;
-		u32 vi_v_start;
-		u32 vi_h_start;
-		u32 vi_x_start;
-		u32 vi_y_start;
-		u32 vi_x_add;
-		u32 vi_y_add;
-		u32 vi_width;
-		u32 vi_origin;
-		u32 vi_minhpass;
-		u32 vi_maxhpass;
-		bool vi_lowerfield;
-		bool vi_fsaa;
-		bool vi_divot;
-		bool vi_ispal;
-	};
-
-	class RdpUpdate
-	{
-	public:
-		void init();
-		bool update(RdpUpdateResult & _result);
-
-	private:
-		s32 oldvstart = 0;
-		u32 prevvicurrent = 0U;
-		bool prevwasblank = false;
-		bool prevserrate = false;
-		bool oldlowerfield = false;
-		s32 emucontrolsvicurrent = -1;
-	} m_rdpUpdate;
+	typedef gli_vi_result RdpUpdateResult;
+	gli_vi_state m_rdpUpdate;
 };
 
 inline
@@ -213,7 +157,6 @@ FrameBufferList & frameBufferList()
 	return FrameBufferList::get();
 }
 
-u32 cutHeight(u32 _address, u32 _height, u32 _stride);
 void calcCoordsScales(const FrameBuffer * _pBuffer, f32 & _scaleX, f32 & _scaleY);
 
 void FrameBuffer_Init();

@@ -1,14 +1,11 @@
-#include <Log.h>
+#include <string>
 #include <Config.h>
 #include "opengl_Utils.h"
 #include "opengl_GLInfo.h"
 #include <regex>
-#ifdef EGL
-#include <EGL/egl.h>
-#endif
+extern "C" void* glsm_get_proc_address(const char*);
 
 #ifdef OS_ANDROID
-#include <Graphics/OpenGLContext/GraphicBuffer/GraphicBufferWrapper.h>
 #endif
 
 using namespace opengl;
@@ -24,11 +21,8 @@ void GLInfo::init() {
 		glGetIntegerv(GL_MAJOR_VERSION, &majorVersion);
 		glGetIntegerv(GL_MINOR_VERSION, &minorVersion);
 	}
-	LOG(LOG_VERBOSE, "%s major version: %d\n", isGLESX ? "OpenGL ES" : "OpenGL", majorVersion);
-	LOG(LOG_VERBOSE, "%s minor version: %d\n", isGLESX ? "OpenGL ES" : "OpenGL", minorVersion);
 
 
-	LOG(LOG_VERBOSE, "OpenGL vendor: %s\n", glGetString(GL_VENDOR));
 	const GLubyte * strRenderer = glGetString(GL_RENDERER);
 	const GLubyte * strDriverVersion = glGetString(GL_VERSION);
 
@@ -54,7 +48,6 @@ void GLInfo::init() {
 		renderer = Renderer::PowerVR;
 	else if (strstr((const char*)strRenderer, "NVIDIA Tegra") != nullptr)
 		renderer = Renderer::Tegra;
-	LOG(LOG_VERBOSE, "OpenGL renderer: %s\n", strRenderer);
 
 	/* ANGLE (Microsoft's GLES translator over D3D11 / D3D12 / Vulkan /
 	 * Metal) reports its underlying device through GL_RENDERER and is
@@ -101,7 +94,7 @@ void GLInfo::init() {
 		msaa = numericVersion >= 31;
 	} else {
 		imageTextures = (numericVersion >= 42) || Utils::isExtensionSupported(*this, "GL_ARB_shader_image_load_store");
-		msaa = false;
+		msaa = numericVersion >= 32;
 	}
 
 	//Tegra has a buggy implementation of fragment_shader_interlock that causes graphics lockups on drivers below 390.00
@@ -120,6 +113,9 @@ void GLInfo::init() {
 			hasBuggyFragmentShaderInterlock = versionNumber < 390.0;
 		}
 	}
+
+	parallelShaderCompile = Utils::isExtensionSupported(*this, "GL_KHR_parallel_shader_compile")
+		|| Utils::isExtensionSupported(*this, "GL_ARB_parallel_shader_compile");
 
 	fragment_interlock = Utils::isExtensionSupported(*this, "GL_ARB_fragment_shader_interlock") && !hasBuggyFragmentShaderInterlock;
 	fragment_interlockNV = Utils::isExtensionSupported(*this, "GL_NV_fragment_shader_interlock") && !fragment_interlock && !hasBuggyFragmentShaderInterlock;
@@ -149,34 +145,24 @@ void GLInfo::init() {
 	}
 
 	bool ext_draw_buffers_indexed = isGLESX && (Utils::isExtensionSupported(*this, "GL_EXT_draw_buffers_indexed") || numericVersion >= 32);
-#ifdef EGL
-	if (isGLESX && bufferStorage)
-		g_glBufferStorage = (PFNGLBUFFERSTORAGEPROC) eglGetProcAddress("glBufferStorageEXT");
+	/* GLES before 3.2 has these only as the EXT names */
 	if (isGLESX && numericVersion < 32) {
 		if (ext_draw_buffers_indexed) {
-			g_glEnablei = (PFNGLENABLEIPROC) eglGetProcAddress("glEnableiEXT");
-			g_glDisablei = (PFNGLDISABLEIPROC) eglGetProcAddress("glDisableiEXT");
+			g_glEnablei = (PFNGLENABLEIPROC) glsm_get_proc_address("glEnableiEXT");
+			g_glDisablei = (PFNGLDISABLEIPROC) glsm_get_proc_address("glDisableiEXT");
 		} else {
 			g_glEnablei = nullptr;
 			g_glDisablei = nullptr;
 		}
 	}
-	if (isGLES2 && shaderStorage) {
-		g_glProgramBinary = (PFNGLPROGRAMBINARYPROC) eglGetProcAddress("glProgramBinaryOES");
-		g_glGetProgramBinary = (PFNGLGETPROGRAMBINARYPROC) eglGetProcAddress("glGetProgramBinaryOES");
-		g_glProgramParameteri = nullptr;
-	}
-#endif
 #ifndef OS_ANDROID
-	if (isGLES2 && config.frameBufferEmulation.copyToRDRAM > Config::ctSync) {
-		config.frameBufferEmulation.copyToRDRAM = Config::ctDisable;
-		LOG(LOG_WARNING, "Async color buffer copies are not supported on GLES2\n");
+	if (isGLES2 && config.frameBufferEmulation.copyToRDRAM > ctSync) {
+		config.frameBufferEmulation.copyToRDRAM = ctDisable;
 	}
 #endif
 	if (isGLES2 && config.generalEmulation.enableLOD) {
 		if (!Utils::isExtensionSupported(*this, "GL_EXT_shader_texture_lod") || !Utils::isExtensionSupported(*this, "GL_OES_standard_derivatives")) {
 			config.generalEmulation.enableLOD = 0;
-			LOG(LOG_WARNING, "LOD emulation not possible on this device\n");
 		}
 	}
 
@@ -188,7 +174,6 @@ void GLInfo::init() {
 	texture_barrierNV = Utils::isExtensionSupported(*this, "GL_NV_texture_barrier");
 
 	ext_fetch = Utils::isExtensionSupported(*this, "GL_EXT_shader_framebuffer_fetch") && !isGLES2 && (!isGLESX || ext_draw_buffers_indexed) && !imageTextures;
-	eglImage = (Utils::isEGLExtensionSupported("EGL_KHR_image_base") || Utils::isEGLExtensionSupported("EGL_KHR_image"));
 
 	/* Mesa freedreno running on the desktop OpenGL profile (not GLES)
 	 * advertises GL_EXT_shader_framebuffer_fetch but the implementation
@@ -235,7 +220,6 @@ void GLInfo::init() {
 	 */
 	ext_fetch_arm = Utils::isExtensionSupported(*this, "GL_ARM_shader_framebuffer_fetch") && !ext_fetch;
 	n64DepthWithFbFetch = ext_fetch;
-	eglImageFramebuffer = eglImage && !isGLES2;
 	dual_source_blending = false;
 	anisotropic_filtering = Utils::isExtensionSupported(*this, "GL_EXT_texture_filter_anisotropic");
 	coverage = dual_source_blending || ext_fetch || ext_fetch_arm;
@@ -247,16 +231,9 @@ void GLInfo::init() {
 	drawElementsBaseVertex = !isGLESX ||
 		(Utils::isExtensionSupported(*this, "GL_EXT_draw_elements_base_vertex") || numericVersion >= 32);
 
-#ifdef OS_ANDROID
-	eglImage = eglImage &&
-	        ( (isGLES2 && GraphicBufferWrapper::isSupportAvailable()) || (isGLESX && GraphicBufferWrapper::isPublicSupportAvailable()) ) &&
-		    (renderer != Renderer::PowerVR);
-#endif
-
 	if (config.frameBufferEmulation.N64DepthCompare != 0) {
 		if (!imageTextures && !ext_fetch) {
 			config.frameBufferEmulation.N64DepthCompare = 0;
-			LOG(LOG_WARNING, "Your GPU does not support the extensions needed for N64 Depth Compare.\n");
 		}
 	}
 }

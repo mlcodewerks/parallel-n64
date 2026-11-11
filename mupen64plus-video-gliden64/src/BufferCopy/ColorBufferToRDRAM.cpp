@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <string.h>
 #include <algorithm>
 
 #include "ColorBufferToRDRAM.h"
@@ -9,8 +10,6 @@
 #include <Config.h>
 #include <N64.h>
 #include <VI.h>
-#include "Log.h"
-#include "MemoryStatus.h"
 
 /*
 #include "ColorBufferToRDRAM_GL.h"
@@ -78,7 +77,7 @@ void ColorBufferToRDRAM::_initFBTexture(void)
 	//The actual VI width is not used for texture width because most texture widths
 	//cause slowdowns in the glReadPixels call, at least on Android
 	m_pTexture->realWidth = m_lastBufferWidth;
-	m_pTexture->realHeight = VI_GetMaxBufferHeight(m_lastBufferWidth);
+	m_pTexture->realHeight = gli_VI_GetMaxBufferHeight(m_lastBufferWidth);
 	/* The color-buffer readers size their glReadPixels rows and source
 	 * stride from width, not realWidth.  addFrameBufferTexture recycles
 	 * CachedTexture objects, so without this the readback runs with
@@ -170,7 +169,7 @@ bool ColorBufferToRDRAM::_prepareCopy(u32& _startAddress)
 
 	if(m_pTexture == nullptr ||
 		m_pTexture->realWidth != _getRealWidth(pBuffer->m_width) ||
-		m_pTexture->realHeight != VI_GetMaxBufferHeight(_getRealWidth(pBuffer->m_width)))
+		m_pTexture->realHeight != gli_VI_GetMaxBufferHeight(_getRealWidth(pBuffer->m_width)))
 	{
 		_destroyFBTexure();
 
@@ -260,7 +259,7 @@ u32 ColorBufferToRDRAM::_RGBAtoRGBA32(u32 _c) {
 void ColorBufferToRDRAM::_copy(u32 _startAddress, u32 _endAddress, bool _sync)
 {
 	const u32 stride = m_pCurFrameBuffer->m_width << m_pCurFrameBuffer->m_size >> 1;
-	const u32 max_height = std::min((u32)VI_GetMaxBufferHeight(m_pCurFrameBuffer->m_width), cutHeight(_startAddress, m_pCurFrameBuffer->m_height, stride));
+	const u32 max_height = std::min((u32)gli_VI_GetMaxBufferHeight(m_pCurFrameBuffer->m_width), cutHeight(_startAddress, m_pCurFrameBuffer->m_height, stride));
 
 	u32 numPixels = (_endAddress - _startAddress) >> (m_pCurFrameBuffer->m_size - 1);
 	if (numPixels / m_pCurFrameBuffer->m_width > max_height) {
@@ -331,11 +330,8 @@ void ColorBufferToRDRAM::_write(const u8 * _pixels, u32 _stride, const ColorCopy
 {
 	if (_g.height == 0)
 		return;
-	/* the RDRAM it was read for may have changed hands since */
-	if (!isMemoryWritable(RDRAM + _g.startAddress, _g.numPixels << _g.size >> 1))
-		return;
 
-	const bool clear = !FBInfo::fbInfo.isSupported() && config.frameBufferEmulation.copyFromRDRAM != 0;
+	const bool clear = !gli_FBInfo_supported() && config.frameBufferEmulation.copyFromRDRAM != 0;
 	if (_g.size == G_IM_SIZ_32b) {
 		u32 *ptr_dst = (u32*)(RDRAM + _g.startAddress);
 		if (clear)
@@ -377,8 +373,6 @@ u32 ColorBufferToRDRAM::_getRealWidth(u32 _viWidth)
 
 void ColorBufferToRDRAM::copyToRDRAM(u32 _address, bool _sync)
 {
-	if (!isMemoryWritable(RDRAM + _address, gDP.colorImage.width << gDP.colorImage.size >> 1))
-		return;
 	if (!_prepareCopy(_address))
 		return;
 	const u32 numBytes = (m_pCurFrameBuffer->m_width*m_pCurFrameBuffer->m_height) << m_pCurFrameBuffer->m_size >> 1;
@@ -389,8 +383,6 @@ void ColorBufferToRDRAM::copyChunkToRDRAM(u32 _startAddress)
 {
 	const u32 endAddress = (_startAddress & ~0xfff) + 0x1000;
 
-	if (!isMemoryWritable(RDRAM + _startAddress, endAddress - _startAddress))
-		return;
 	if (!_prepareCopy(_startAddress))
 		return;
 	_copy(_startAddress, endAddress, true);

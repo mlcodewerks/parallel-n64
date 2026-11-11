@@ -18,7 +18,6 @@
 #include "FrameBuffer.h"
 #include "DepthBuffer.h"
 #include "Config.h"
-#include "Log.h"
 #include "DisplayWindow.h"
 #include <arm_neon.h>
 
@@ -235,7 +234,7 @@ static void DotProductMax4FullNeon( float v0[3], float v1[4][3], float lights[4]
 
 void gSPLightVertex_NEON(u32 vnum, u32 v, SPVertex * spVtx)
 {
-	if (!isHWLightingAllowed()) {
+	if (!gli_isHWLightingAllowed()) {
 		for(int j = 0; j < vnum; ++j) {
 			SPVertex & vtx = spVtx[v + j];
 			vtx.r = gSP.lights.rgb[gSP.numLights][R];
@@ -269,7 +268,7 @@ void gSPLightVertex_NEON(u32 vnum, u32 v, SPVertex * spVtx)
 	} else {
 		for(int j = 0; j < vnum; ++j) {
 			SPVertex & vtx = spVtx[v+j];
-			TransformVectorNormalize(&vtx.r, gSP.matrix.modelView[gSP.matrix.modelViewi]);
+			gli_TransformVectorNormalize(&vtx.r, gSP.matrix.modelView[gSP.matrix.modelViewi]);
 			vtx.HWLight = gSP.numLights;
 		}
 	}

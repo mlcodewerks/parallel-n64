@@ -26,6 +26,7 @@
 #include "device.hpp"
 #include "rdp_common.hpp"
 #include "rdp_worker.h"
+#include "pipeline_pending.h"
 #include <retro_atomic.h>
 
 namespace RDP
@@ -97,6 +98,8 @@ struct ValidationInterface
 	void *user;
 };
 
+class VideoInterface;
+
 class Renderer
 {
 public:
@@ -118,7 +121,7 @@ public:
 	/* Hands the pipelines @records lists to the pipeline worker: those a
 	 * draw cannot do without first, then those it has a fallback for. The
 	 * thread that processes commands, once, after init_renderer. */
-	void build_pipelines_ahead(const pipeline_record_t *records, size_t count);
+	void build_pipelines_ahead(const pipeline_record_t *records, size_t count, VideoInterface *vi, bool with_upscaler);
 	/* Returns once the worker has built the first kind; any thread but the
 	 * one processing commands, after build_pipelines_ahead returned. */
 	void wait_pipelines_ahead();
@@ -367,10 +370,26 @@ private:
 	void update_deduced_height(const TriangleSetup &setup);
 	void submit_tile_binning_combined(Vulkan::CommandBuffer &cmd, bool upscaled);
 	void clear_indirect_buffer(Vulkan::CommandBuffer &cmd);
+
+	enum { MaxKnownPipelines = 256 };
+	struct KnownPipelines
+	{
+		void *nodes;
+		size_t n, limit;
+		Renderer *renderer;
+	};
+	static void add_known_pipeline(void *list, Vulkan::CommandBuffer &cmd, uint32_t kind);
+	size_t queue_known_pipelines(void *nodes, size_t n, VideoInterface *vi, bool with_upscaler);
+	void set_span_setup_pipeline(Vulkan::CommandBuffer &cmd, bool upscale);
+	uint32_t set_tile_binning_pipeline(Vulkan::CommandBuffer &cmd, bool upscale);
+	void set_depth_blend_pipeline(Vulkan::CommandBuffer &cmd, uint32_t fmt, bool same_addr,
+	                              bool upscaled, bool force_write_mask);
 	void submit_rasterization(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &tmem, bool upscaled);
 	void submit_depth_blend(Vulkan::CommandBuffer &cmd, Vulkan::Buffer &tmem, bool upscaled, bool force_write_mask);
 
 	enum class ResolveStage { Pre, Post, SSAAResolve };
+	void set_upscaled_domain_pipeline(Vulkan::CommandBuffer &cmd, ResolveStage stage,
+	                                  unsigned pixel_size_log2, bool same_addr);
 	void submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, ResolveStage stage);
 	void submit_update_upscaled_domain(Vulkan::CommandBuffer &cmd, ResolveStage stage,
 	                                   unsigned addr, unsigned depth_addr,
@@ -399,16 +418,11 @@ private:
 	bool can_support_minimum_subgroup_size(unsigned size) const;
 	bool supports_subgroup_size_control(uint32_t minimum_size, uint32_t maximum_size) const;
 
-	// The compute pipelines queued to the worker: open addressing on the
-	// hash, a power of two long, with 0 kept apart.
-	struct
-	{
-		Util::Hash *keys = nullptr;
-		unsigned capacity = 0;
-		unsigned count = 0;
-		bool has_zero = false;
-	} pending_async_pipelines;
-	bool pending_async_pipeline_insert(Util::Hash hash);
+	// The compute pipelines queued to the worker, and the jobs carrying
+	// them (pipeline_nodes): both allocated before the first frame.
+	rdp_hash_set_t pending_async_pipelines = {};
+	rdp_node_pool_t pipeline_node_pool;
+	void *pipeline_nodes = nullptr;
 
 	unsigned compute_conservative_max_num_tiles(const TriangleSetup &setup) const;
 

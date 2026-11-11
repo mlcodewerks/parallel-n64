@@ -368,46 +368,93 @@ ifeq ($(HAVE_GLIDEN64),1)
 CFLAGS   += -DHAVE_GLIDEN64 -DMUPENPLUSAPI -D__LIBRETRO__
 CXXFLAGS += -DHAVE_GLIDEN64 -DMUPENPLUSAPI -D__LIBRETRO__
 
-# xxhash 0.8 is a single-header library; the implementation is inlined
-# into CRC_OPT.cpp via #define XXH_INLINE_ALL. No separate xxhash.c
-# translation unit is required - the 0.6.5 xxhash.c was deleted on the
-# library bump and is no longer present in the tree.
+# The texture hash is libretro-common xxh3 (encoding_xxh3.c).
 
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/StereoJournal.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/N64.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/gDP.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TexrectDrawer.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/FrameBufferInfo.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/ZlutTexture.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/PaletteTexture.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/NoiseTexture.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/StereoFrames.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TextureFilterHandler.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/PostProcessor.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/Config.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/CombinerKey.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/PluginAPI.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DisplayWindow.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DepthBuffer.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/CombinerDecode.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TextureDecode.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TextureSizes.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TextureLRU.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/VIUpdate.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/FrameBufferRdram.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/FrameBufferList.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TriangleList.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DrawerViewport.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DrawerStates.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DrawerRect.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TexrectSpecial.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/BlendMode.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/mupenplus/Config_mupenplus.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/gSP.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/GBI.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/RSP.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/VI.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/SoftwareRender.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DepthBufferRender/ClipPolygon.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DepthBufferRender/DepthBufferRender.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/RDP.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/CRC_OPT.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/GLideN64.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F5Indi_Naboo.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F5Rogue.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/S2DEX.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/ZSort.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/ZSortBOSS.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/T3DUX.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/Turbo3D.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2ACCLAIM.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DFLX2.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/L3D.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/L3DEX.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/L3DEX2.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX3.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX095.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DZEX2.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DPD.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DTEXA.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DGOLDEN.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/S2DEX2.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DBETA.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DAM.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DSETA.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DDKR.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2CBFD.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/uCodes/F3D.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/convert.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/RSP_LoadMatrix.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_spirv.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_shaders.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_renderer.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_device.c
+ifneq ($(HAVE_PARALLEL),1)
+SOURCES_C     += $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/rdp_worker.c
+endif
+INCFLAGS      += -I$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan-headers/include -I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp -I$(CORE_DIR)/src/api -I$(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext
 
 SOURCES_CXX   += \
 	$(VIDEODIR_GLIDEN64)/src/Combiner.cpp                                                         \
-    $(VIDEODIR_GLIDEN64)/src/CombinerKey.cpp                                                      \
-    $(VIDEODIR_GLIDEN64)/src/CommonPluginAPI.cpp                                                  \
-    $(VIDEODIR_GLIDEN64)/src/Config.cpp                                                           \
-    $(VIDEODIR_GLIDEN64)/src/convert.cpp                                                          \
-    $(VIDEODIR_GLIDEN64)/src/CRC_OPT.cpp                                                          \
-    $(VIDEODIR_GLIDEN64)/src/DepthBuffer.cpp                                                      \
-    $(VIDEODIR_GLIDEN64)/src/DisplayWindow.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/mupen64plus/mupen64plus_DisplayWindow.cpp     \
+    $(VIDEODIR_GLIDEN64)/src/DepthBufferGpu.cpp                                                   \
+    $(VIDEODIR_GLIDEN64)/src/DisplayWindowGpu.cpp                                                 \
     $(VIDEODIR_GLIDEN64)/src/FrameBuffer.cpp                                                      \
-    $(VIDEODIR_GLIDEN64)/src/FrameBufferInfo.cpp                                                  \
-    $(VIDEODIR_GLIDEN64)/src/GBI.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/gDP.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/GLideN64.cpp                                                         \
-    $(VIDEODIR_GLIDEN64)/src/gSP.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/N64.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/PaletteTexture.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/PostProcessor.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/StereoFrames.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/RDP.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/RSP.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/SoftwareRender.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/TexrectDrawer.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/TextureFilterHandler.cpp                                             \
+    $(VIDEODIR_GLIDEN64)/src/TexrectDrawerGpu.cpp                                                    \
     $(VIDEODIR_GLIDEN64)/src/Textures.cpp                                                         \
-    $(VIDEODIR_GLIDEN64)/src/VI.cpp                                                               \
-    $(VIDEODIR_GLIDEN64)/src/ZlutTexture.cpp                                                      \
-    $(VIDEODIR_GLIDEN64)/src/common/CommonAPIImpl_common.cpp                                      \
-    $(VIDEODIR_GLIDEN64)/src/NoiseTexture.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/Log.cpp                                                              \
-    $(VIDEODIR_GLIDEN64)/src/DepthBufferRender/ClipPolygon.cpp                                    \
-    $(VIDEODIR_GLIDEN64)/src/DepthBufferRender/DepthBufferRender.cpp                              \
     $(VIDEODIR_GLIDEN64)/src/BufferCopy/ColorBufferToRDRAM.cpp                                    \
     $(VIDEODIR_GLIDEN64)/src/BufferCopy/DepthBufferToRDRAM.cpp                                    \
     $(VIDEODIR_GLIDEN64)/src/BufferCopy/RDRAMtoColorBuffer.cpp                                    \
@@ -416,13 +463,14 @@ SOURCES_CXX   += \
     $(VIDEODIR_GLIDEN64)/src/Graphics/ColorBufferReader.cpp                                       \
     $(VIDEODIR_GLIDEN64)/src/Graphics/CombinerProgram.cpp                                         \
     $(VIDEODIR_GLIDEN64)/src/Graphics/ObjectHandle.cpp                                            \
+    $(VIDEODIR_GLIDEN64)/src/Graphics/CombinerValues.cpp                                          \
+    $(VIDEODIR_GLIDEN64)/src/Graphics/VulkanContext/vk_ContextImpl.cpp                            \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GLFunctions.cpp                               \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_Attributes.cpp                         \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_BufferedDrawer.cpp                     \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_BufferManipulationObjectFactory.cpp    \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_CachedFunctions.cpp                    \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithBufferStorage.cpp \
-    $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithEGLImage.cpp      \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithPixelBuffer.cpp   \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_ColorBufferReaderWithReadPixels.cpp    \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/opengl_ContextImpl.cpp                        \
@@ -439,38 +487,7 @@ SOURCES_CXX   += \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GLSL/glsl_ShaderStorage.cpp                   \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GLSL/glsl_SpecialShadersFactory.cpp           \
     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GLSL/glsl_Utils.cpp                           \
-    $(VIDEODIR_GLIDEN64)/src/mupenplus/MemoryStatus_mupenplus.cpp                                 \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3D.cpp                                                       \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DAM.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DBETA.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DDKR.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX095.cpp                                                  \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2ACCLAIM.cpp                                             \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX2CBFD.cpp                                                \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DEX3.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DZEX2.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DFLX2.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DGOLDEN.cpp                                                 \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DPD.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DSETA.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F5Indi_Naboo.cpp                                              \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F5Rogue.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/F3DTEXA.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/L3D.cpp                                                       \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/L3DEX2.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/L3DEX.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/S2DEX2.cpp                                                    \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/S2DEX.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/T3DUX.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/Turbo3D.cpp                                                   \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/ZSort.cpp                                                     \
-    $(VIDEODIR_GLIDEN64)/src/uCodes/ZSortBOSS.cpp                                                 \
-	$(VIDEODIR_GLIDEN64)/src/MupenPlusPluginAPI.cpp                                               \
-	$(VIDEODIR_GLIDEN64)/src/mupenplus/MupenPlusAPIImpl.cpp                                       \
-	$(VIDEODIR_GLIDEN64)/src/mupenplus/Config_mupenplus.cpp                                       \
-	$(VIDEODIR_GLIDEN64)/src/mupenplus/CommonAPIImpl_mupenplus.cpp							      
+    $(VIDEODIR_GLIDEN64)/src/uCodes/S2DEX_gfx.cpp
 
 SOURCES_CXX   += \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TextureFilters.cpp \
@@ -488,8 +505,7 @@ SOURCES_CXX   += \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxQuantize.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxReSample.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxTexCache.cpp \
-	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxUtil.cpp \
-	$(VIDEODIR_GLIDEN64)/src/RSP_LoadMatrix.cpp
+	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxUtil.cpp
 
 # GLideNHQ's persistent filter/quantize pool (C89)
 SOURCES_C += $(VIDEODIR_GLIDEN64)/src/GLideNHQ/txpool.c
@@ -500,17 +516,16 @@ else
 	SOURCES_C += $(VIDEODIR_GLIDEN64)/src/osal/osal_files_unix.c
 endif
 
-ifneq (,$(findstring unix,$(platform)))
-	SOURCES_CXX   += $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GraphicBuffer/PrivateApi/libhardware.cpp   \
-    			     $(VIDEODIR_GLIDEN64)/src/Graphics/OpenGLContext/GraphicBuffer/PrivateApi/GraphicBuffer.cpp
-endif
-
 ifeq ($(HAVE_NEON),1)
 	SOURCES_CXX   += $(VIDEODIR_GLIDEN64)/src/Neon/3DMathNeon.cpp \
 					 $(VIDEODIR_GLIDEN64)/src/Neon/gSPNeon.cpp
 else
-	SOURCES_CXX   += $(VIDEODIR_GLIDEN64)/src/3DMath.cpp
+	SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/3DMath.c
 endif
+endif
+
+ifneq (,$(filter 1,$(HAVE_GLIDEN64) $(HAVE_GLN64) $(HAVE_RICE)))
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/CombinerKeyJournal.c
 endif
 
 ifeq ($(HAVE_GLN64),1)

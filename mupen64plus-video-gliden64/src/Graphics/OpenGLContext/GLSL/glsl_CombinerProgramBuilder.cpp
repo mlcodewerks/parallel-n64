@@ -1,13 +1,19 @@
+#include <string>
 #include <assert.h>
-#include <Log.h>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <Config.h>
 #include "glsl_Utils.h"
 #include "glsl_ShaderPart.h"
 #include "glsl_CombinerInputs.h"
 #include "glsl_CombinerProgramImpl.h"
 #include "glsl_CombinerProgramBuilder.h"
+#include <Graphics/CombinerStages.h>
 #include "glsl_CombinerProgramUniformFactory.h"
 #include <NoiseTexture.h>
+#include <Graphics/OpenGLContext/opengl_CachedFunctions.h>
 
 #define NOISE_STR_(x) #x
 #define NOISE_STR(x) NOISE_STR_(x)
@@ -95,53 +101,6 @@ const char *AlphaInput[] = {
 	"1.0",
 	"0.0"
 };
-
-inline
-int correctFirstStageParam(int _param)
-{
-	switch (_param) {
-	case G_GCI_TEXEL1:
-		return G_GCI_TEXEL0;
-	case G_GCI_TEXEL1_ALPHA:
-		return G_GCI_TEXEL0_ALPHA;
-	}
-	return _param;
-}
-
-static
-void _correctFirstStageParams(CombinerStage & _stage)
-{
-	for (int i = 0; i < _stage.numOps; ++i) {
-		_stage.op[i].param1 = correctFirstStageParam(_stage.op[i].param1);
-		_stage.op[i].param2 = correctFirstStageParam(_stage.op[i].param2);
-		_stage.op[i].param3 = correctFirstStageParam(_stage.op[i].param3);
-	}
-}
-
-inline
-int correctSecondStageParam(int _param)
-{
-	switch (_param) {
-	case G_GCI_TEXEL0:
-		return G_GCI_TEXEL1;
-	case G_GCI_TEXEL1:
-		return G_GCI_TEXEL0;
-	case G_GCI_TEXEL0_ALPHA:
-		return G_GCI_TEXEL1_ALPHA;
-	case G_GCI_TEXEL1_ALPHA:
-		return G_GCI_TEXEL0_ALPHA;
-	}
-	return _param;
-}
-
-static
-void _correctSecondStageParams(CombinerStage & _stage) {
-	for (int i = 0; i < _stage.numOps; ++i) {
-		_stage.op[i].param1 = correctSecondStageParam(_stage.op[i].param1);
-		_stage.op[i].param2 = correctSecondStageParam(_stage.op[i].param2);
-		_stage.op[i].param3 = correctSecondStageParam(_stage.op[i].param3);
-	}
-}
 
 static
 CombinerInputs _compileCombiner(const CombinerStage & _stage, const char** _Input, std::stringstream & _strShader) {
@@ -511,7 +470,6 @@ class ShaderBlender1 : public ShaderPart
 public:
 	ShaderBlender1()
 	{
-#if 1
 			m_part =
 				"  muxPM[0] = clampedColor;													\n"
 				"  lowp vec4 vprobe = vec4(0.0, 1.0, 2.0, 3.0);								\n"
@@ -534,18 +492,6 @@ public:
 #endif
 				"  }																		\n"
 				;
-#else
-		// Keep old code for reference
-		m_part =
-			"  muxPM[0] = clampedColor;								\n"
-			"  if (uForceBlendCycle1 != 0) {						\n"
-			"    muxA[0] = clampedColor.a;							\n"
-			"    muxB[0] = 1.0 - muxA[uBlendMux1[1]];				\n"
-			"    lowp vec4 blend1 = (muxPM[uBlendMux1[0]] * muxA[uBlendMux1[1]]) + (muxPM[uBlendMux1[2]] * muxB[uBlendMux1[3]]);	\n"
-			"    clampedColor.rgb = clamp(blend1.rgb, 0.0, 1.0);	\n"
-			"  } else clampedColor.rgb = muxPM[uBlendMux1[0]].rgb;	\n"
-			;
-#endif
 	}
 };
 
@@ -554,7 +500,6 @@ class ShaderBlender2 : public ShaderPart
 public:
 	ShaderBlender2()
 	{
-#if 1
 			m_part =
 				"  muxPM[0] = clampedColor;													\n"
 				"  muxPM[1] = vec4(0.0);													\n"
@@ -577,19 +522,6 @@ public:
 #endif
 				"  }																		\n"
 				;
-#else
-		// Keep old code for reference
-		m_part =
-			"  muxPM[0] = clampedColor;								\n"
-			"  muxPM[1] = vec4(0.0);								\n"
-			"  if (uForceBlendCycle2 != 0) {						\n"
-			"    muxA[0] = clampedColor.a;							\n"
-			"    muxB[0] = 1.0 - muxA[uBlendMux2[1]];				\n"
-			"    lowp vec4 blend2 = muxPM[uBlendMux2[0]] * muxA[uBlendMux2[1]] + muxPM[uBlendMux2[2]] * muxB[uBlendMux2[3]];	\n"
-			"    clampedColor.rgb = clamp(blend2.rgb, 0.0, 1.0);	\n"
-			"  } else clampedColor.rgb = muxPM[uBlendMux2[0]].rgb;	\n"
-			;
-#endif
 	}
 };
 
@@ -2172,42 +2104,6 @@ bool needClampColor() {
 	return g_cycleType <= G_CYC_2CYCLE;
 }
 
-static
-bool combinedColorC(const gDPCombine & _combine) {
-	if (g_cycleType != G_CYC_2CYCLE)
-		return false;
-	return _combine.mRGB1 == G_CCMUX_COMBINED;
-}
-
-static
-bool combinedAlphaC(const gDPCombine & _combine) {
-	if (g_cycleType != G_CYC_2CYCLE)
-		return false;
-	return _combine.mA1 == G_ACMUX_COMBINED;
-}
-
-static
-bool combinedColorABD(const gDPCombine & _combine) {
-	if (g_cycleType != G_CYC_2CYCLE)
-		return false;
-	if (_combine.aRGB1 == G_CCMUX_COMBINED)
-		return true;
-	if (_combine.saRGB1 == G_CCMUX_COMBINED || _combine.sbRGB1 == G_CCMUX_COMBINED)
-		return _combine.mRGB1 != G_CCMUX_0;
-	return false;
-}
-
-static
-bool combinedAlphaABD(const gDPCombine & _combine) {
-	if (g_cycleType != G_CYC_2CYCLE)
-		return false;
-	if (_combine.aA1 == G_ACMUX_COMBINED)
-		return true;
-	if (_combine.saA1 == G_ACMUX_COMBINED || _combine.sbA1 == G_ACMUX_COMBINED)
-		return _combine.mA1 != G_ACMUX_0;
-	return false;
-}
-
 CombinerInputs CombinerProgramBuilder::compileCombiner(const CombinerKey & _key, Combiner & _color, Combiner & _alpha, std::string & _strShader)
 {
 	gDPCombine combine;
@@ -2216,15 +2112,15 @@ CombinerInputs CombinerProgramBuilder::compileCombiner(const CombinerKey & _key,
 	std::stringstream ssShader;
 
 	if (g_cycleType != G_CYC_2CYCLE) {
-		_correctFirstStageParams(_alpha.stage[0]);
-		_correctFirstStageParams(_color.stage[0]);
+		graphics::correctFirstStageParams(_alpha.stage[0]);
+		graphics::correctFirstStageParams(_color.stage[0]);
 	}
 	ssShader << "  alpha1 = ";
 	CombinerInputs inputs = _compileCombiner(_alpha.stage[0], AlphaInput, ssShader);
 	// Simulate N64 color sign-extend.
-	if (combinedAlphaC(combine))
+	if (graphics::combinedAlphaC(g_cycleType, combine))
 		m_signExtendAlphaC->write(ssShader);
-	else if (combinedAlphaABD(combine))
+	else if (graphics::combinedAlphaABD(g_cycleType, combine))
 		m_signExtendAlphaABD->write(ssShader);
 
 	if (g_cycleType < G_CYC_FILL)
@@ -2233,9 +2129,9 @@ CombinerInputs CombinerProgramBuilder::compileCombiner(const CombinerKey & _key,
 	ssShader << "  color1 = ";
 	inputs += _compileCombiner(_color.stage[0], ColorInput, ssShader);
 	// Simulate N64 color sign-extend.
-	if (combinedColorC(combine))
+	if (graphics::combinedColorC(g_cycleType, combine))
 		m_signExtendColorC->write(ssShader);
-	else if (combinedColorABD(combine))
+	else if (graphics::combinedColorABD(g_cycleType, combine))
 		m_signExtendColorABD->write(ssShader);
 
 	if (g_cycleType == G_CYC_2CYCLE) {
@@ -2243,7 +2139,7 @@ CombinerInputs CombinerProgramBuilder::compileCombiner(const CombinerKey & _key,
 		ssShader << "  combined_color = vec4(color1, alpha1);" << std::endl;
 		if (_alpha.numStages == 2) {
 			ssShader << "  alpha2 = ";
-			_correctSecondStageParams(_alpha.stage[1]);
+			graphics::correctSecondStageParams(_alpha.stage[1]);
 			inputs += _compileCombiner(_alpha.stage[1], AlphaInput, ssShader);
 		}
 		else
@@ -2253,7 +2149,7 @@ CombinerInputs CombinerProgramBuilder::compileCombiner(const CombinerKey & _key,
 
 		if (_color.numStages == 2) {
 			ssShader << "  color2 = ";
-			_correctSecondStageParams(_color.stage[1]);
+			graphics::correctSecondStageParams(_color.stage[1]);
 			inputs += _compileCombiner(_color.stage[1], ColorInput, ssShader);
 		}
 		else
@@ -2307,12 +2203,25 @@ graphics::CombinerProgram * CombinerProgramBuilder::buildCombinerProgram(Combine
 	const bool bUseTextures = combinerInputs.usesTexture();
 	const bool bIsRect = _key.isRectKey();
 	const bool bUseHWLight = !bIsRect && // Rects not use lighting
-							 isHWLightingAllowed() &&
+							 gli_isHWLightingAllowed() &&
 							 combinerInputs.usesShadeColor();
 
 	if (bUseHWLight)
 		combinerInputs.addInput(G_GCI_HW_LIGHT);
 
+	const std::string strFragmentShader(_fragmentSource(combinerInputs, strCombiner, bUseLod, bUseTextures, bUseHWLight, nullptr));
+	GLuint program = _startProgram(strFragmentShader, bIsRect, bUseTextures, true);
+	assert(Utils::checkProgramLinkStatus(program));
+
+	CombinerUniforms uniforms;
+	m_uniformFactory->buildUniforms(program, combinerInputs, _key, uniforms);
+
+	return new CombinerProgramImpl(_key, program, m_useProgram, combinerInputs, std::move(uniforms));
+}
+
+std::string CombinerProgramBuilder::_fragmentSource(const CombinerInputs & combinerInputs, const std::string & strCombiner,
+	bool bUseLod, bool bUseTextures, bool bUseHWLight, const char * _uberDeclarations)
+{
 	std::stringstream ssShader;
 
 	/* Write headers */
@@ -2351,6 +2260,9 @@ graphics::CombinerProgram * CombinerProgramBuilder::buildCombinerProgram(Combine
 
 	if (bUseHWLight)
 		m_fragmentHeaderCalcLight->write(ssShader);
+
+	if (_uberDeclarations != nullptr)
+		ssShader << _uberDeclarations;
 
 	/* Write body */
 	if (g_cycleType == G_CYC_2CYCLE)
@@ -2420,16 +2332,17 @@ graphics::CombinerProgram * CombinerProgramBuilder::buildCombinerProgram(Combine
 
 	m_shaderN64DepthRender->write(ssShader);
 
-	const std::string strFragmentShader(std::move(ssShader.str()));
+	return ssShader.str();
+}
 
-	/* Create shader program */
-
+/* Compiles and links. Only with _check is it asked how that went: asking
+ * is what waits for a driver compiling on its own threads. */
+GLuint CombinerProgramBuilder::_startProgram(const std::string & _fragment, bool bIsRect, bool bUseTextures, bool _check)
+{
 	GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-	const GLchar * strShaderData = strFragmentShader.data();
+	const GLchar * strShaderData = _fragment.data();
 	glShaderSource(fragmentShader, 1, &strShaderData, nullptr);
 	glCompileShader(fragmentShader);
-	if (!Utils::checkShaderCompileStatus(fragmentShader))
-	Utils::logErrorShader(GL_FRAGMENT_SHADER, strFragmentShader);
 
 	GLuint program = glCreateProgram();
 	Utils::locateAttributes(program, bIsRect, bUseTextures);
@@ -2443,13 +2356,358 @@ graphics::CombinerProgram * CombinerProgramBuilder::buildCombinerProgram(Combine
 			glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 	}
 	glLinkProgram(program);
-	assert(Utils::checkProgramLinkStatus(program));
 	glDeleteShader(fragmentShader);
+	return program;
+}
 
-	UniformGroups uniforms;
-	m_uniformFactory->buildUniforms(program, combinerInputs, _key, uniforms);
+/*---------------Ubershader-------------*/
 
-	return new CombinerProgramImpl(_key, program, m_useProgram, combinerInputs, std::move(uniforms));
+#ifndef GL_COMPLETION_STATUS_KHR
+#define GL_COMPLETION_STATUS_KHR 0x91B1
+#endif
+
+/* One flat list of what the stages do, as _compileCombiner writes them:
+ * in each of the four stages four words of op * 256 + input, ended by -1.
+ * INTER keeps its other two inputs in the next two words. */
+static const char * const uberDeclarations =
+	"uniform mediump int uCmbOps[16];			\n"
+	"uniform mediump int uCmbFlags;				\n";
+
+enum {
+	UBER_ALPHA_C = 1,
+	UBER_ALPHA_ABD = 2,
+	UBER_COLOR_C = 4,
+	UBER_COLOR_ABD = 8,
+	UBER_TWO_STAGES = 16
+};
+
+static
+void _uberStage(std::stringstream & _s, const char * _target, const char * _type, const char * _in, int _stage)
+{
+	const int base = _stage * 4;
+	_s << "  { lowp " << _type << " v = " << _type << "(0.0);\n"
+	   << "    for (int i = 0; i < 4; ++i) {\n"
+	   << "      int o = uCmbOps[" << base << " + i];\n"
+	   << "      if (o < 0) break;\n"
+	   << "      int p = o & 255; int k = o >> 8;\n"
+	   << "      if (k == 0) v = " << _in << "[p];\n"
+	   << "      else if (k == 1) v = v - " << _in << "[p];\n"
+	   << "      else if (k == 2) v = v * " << _in << "[p];\n"
+	   << "      else if (k == 3) v = v + " << _in << "[p];\n"
+	   << "      else { v = mix(" << _in << "[uCmbOps[" << base + 1 << "]], " << _in << "[p], " << _in << "[uCmbOps[" << base + 2 << "]]); break; }\n"
+	   << "    }\n"
+	   << "    " << _target << " = v; }\n";
+}
+
+/* What compileCombiner writes, with the stages and the sign extensions
+ * chosen by uniforms instead of written in. */
+std::string CombinerProgramBuilder::_uberCombiner(bool _textured, bool _lod)
+{
+	std::stringstream s;
+	s << "  lowp vec3 ci[21]; lowp float ai[21];\n"
+	  << "  for (int i = 0; i < 21; ++i) { ci[i] = vec3(0.0); ai[i] = 0.0; }\n";
+	if (_textured) {
+		s << "  ci[1] = readtex0.rgb; ci[2] = readtex1.rgb; ci[9] = vec3(readtex0.a); ci[10] = vec3(readtex1.a);\n"
+		  << "  ai[1] = readtex0.a; ai[2] = readtex1.a; ai[9] = readtex0.a; ai[10] = readtex1.a;\n";
+		if (_lod)
+			s << "  ci[14] = vec3(lod_frac); ai[14] = lod_frac;\n";
+	}
+	s << "  ci[3] = uPrimColor.rgb; ci[4] = vec_color.rgb; ci[5] = uEnvColor.rgb; ci[6] = uCenterColor.rgb; ci[7] = uScaleColor.rgb;\n"
+	  << "  ci[11] = vec3(uPrimColor.a); ci[12] = vec3(vec_color.a); ci[13] = vec3(uEnvColor.a); ci[15] = vec3(uPrimLod);\n"
+	  << "  ci[16] = vec3(0.5 + 0.5*snoise()); ci[17] = vec3(uK4); ci[18] = vec3(uK5); ci[19] = vec3(1.0);\n"
+	  << "  ai[3] = uPrimColor.a; ai[4] = vec_color.a; ai[5] = uEnvColor.a; ai[6] = uCenterColor.a; ai[7] = uScaleColor.a;\n"
+	  << "  ai[11] = uPrimColor.a; ai[12] = vec_color.a; ai[13] = uEnvColor.a; ai[15] = uPrimLod;\n"
+	  << "  ai[16] = 0.5 + 0.5*snoise(); ai[17] = uK4; ai[18] = uK5; ai[19] = 1.0;\n";
+
+	_uberStage(s, "alpha1", "float", "ai", 0);
+	s << "  if ((uCmbFlags & " << UBER_ALPHA_C << ") != 0) {\n";
+	m_signExtendAlphaC->write(s);
+	s << "  } else if ((uCmbFlags & " << UBER_ALPHA_ABD << ") != 0) {\n";
+	m_signExtendAlphaABD->write(s);
+	s << "  }\n";
+
+	m_alphaTest->write(s);
+
+	_uberStage(s, "color1", "vec3", "ci", 1);
+	s << "  if ((uCmbFlags & " << UBER_COLOR_C << ") != 0) {\n";
+	m_signExtendColorC->write(s);
+	s << "  } else if ((uCmbFlags & " << UBER_COLOR_ABD << ") != 0) {\n";
+	m_signExtendColorABD->write(s);
+	s << "  }\n";
+
+	if (g_cycleType == G_CYC_2CYCLE) {
+		s << "  combined_color = vec4(color1, alpha1);\n"
+		  << "  ci[0] = color1; ci[8] = vec3(alpha1); ai[0] = alpha1; ai[8] = alpha1;\n"
+		  << "  if ((uCmbFlags & " << UBER_TWO_STAGES << ") != 0) {\n";
+		_uberStage(s, "alpha2", "float", "ai", 2);
+		s << "  } else alpha2 = alpha1;\n"
+		  << "  if (uCvgXAlpha != 0 && alpha2 < 0.125) discard;\n"
+		  << "  if ((uCmbFlags & " << UBER_TWO_STAGES << ") != 0) {\n";
+		_uberStage(s, "color2", "vec3", "ci", 3);
+		s << "  } else color2 = color1;\n"
+		  << "  lowp vec4 cmbRes = vec4(color2, alpha2);\n";
+	} else {
+		s << "  if (uCvgXAlpha != 0 && alpha1 < 0.125) discard;\n"
+		  << "  lowp vec4 cmbRes = vec4(color1, alpha1);\n";
+	}
+
+	m_clamp->write(s);
+	m_callDither->write(s);
+
+	if (config.generalEmulation.enableLegacyBlending == 0) {
+		m_blender1->write(s);
+		if (g_cycleType == G_CYC_2CYCLE)
+			m_blender2->write(s);
+		s << "  fragColor = clampedColor;\n";
+	} else {
+		s << "  fragColor = clampedColor;\n";
+		m_legacyBlender->write(s);
+	}
+	return s.str();
+}
+
+/* Draws with the ubershader, with this key's stages, while the driver
+ * compiles the key's own program; from then on it is that program. */
+class glsl::CombinerProgramAsync : public graphics::CombinerProgram
+{
+public:
+	CombinerProgramAsync(const CombinerKey & _key, const CombinerInputs & _inputs,
+		CombinerProgramBuilder::UberVariant * _uber, const GLint * _ops, GLint _flags, GLuint _pending,
+		CombinerProgramUniformFactory * _factory, opengl::CachedUseProgram * _useProgram, int _delay)
+	: m_key(_key), m_inputs(_inputs), m_uber(_uber), m_flags(_flags), m_pending(_pending)
+	, m_factory(_factory), m_useProgram(_useProgram), m_real(nullptr), m_delay(_delay)
+	{
+		std::copy_n(_ops, 16, m_ops);
+	}
+
+	~CombinerProgramAsync()
+	{
+		if (m_pending != 0) {
+			m_useProgram->useProgram(graphics::ObjectHandle::null);
+			glDeleteProgram(m_pending);
+		}
+		if (m_uber->owner == this)
+			m_uber->owner = nullptr;
+		delete m_real;
+	}
+
+	void activate() override
+	{
+		_poll(false);
+		if (m_real != nullptr) {
+			m_real->activate();
+			return;
+		}
+		m_uber->program->activate();
+		_setStages();
+	}
+
+	void update(bool _force) override
+	{
+		_poll(false);
+		if (m_real != nullptr) {
+			m_real->update(_force);
+			return;
+		}
+		m_uber->program->update(_force);
+		_setStages();
+	}
+
+	const CombinerKey & getKey() const override { return m_key; }
+	bool usesTexture() const override { return m_inputs.usesTexture(); }
+	bool usesTile(u32 _t) const override { return m_inputs.usesTile(_t); }
+	bool usesShade() const override { return m_inputs.usesShade(); }
+	bool usesLOD() const override { return m_inputs.usesLOD(); }
+	bool usesHwLighting() const override { return m_inputs.usesHwLighting(); }
+
+	bool getBinaryForm(std::vector<char> & _buffer) override
+	{
+		_poll(true);
+		return m_real != nullptr && m_real->getBinaryForm(_buffer);
+	}
+
+private:
+	void _setStages()
+	{
+		if (m_uber->owner == this)
+			return;
+		m_uber->owner = this;
+		for (int i = 0; i < 16; ++i)
+			glUniform1i(m_uber->opsLoc[i], m_ops[i]);
+		glUniform1i(m_uber->flagsLoc, m_flags);
+	}
+
+	void _poll(bool _wait)
+	{
+		if (m_pending == 0)
+			return;
+		if (!_wait && m_delay > 0) {
+			--m_delay;
+			return;
+		}
+		GLint done = GL_TRUE;
+		if (!_wait)
+			glGetProgramiv(m_pending, GL_COMPLETION_STATUS_KHR, &done);
+		if (done == GL_FALSE)
+			return;
+		const GLuint program = m_pending;
+		m_pending = 0;
+		GLint linked = GL_FALSE;
+		glGetProgramiv(program, GL_LINK_STATUS, &linked);
+		if (linked == GL_FALSE) {
+			/* stays on the ubershader, which draws the same */
+			glDeleteProgram(program);
+			return;
+		}
+		CombinerUniforms uniforms;
+		m_factory->buildUniforms(program, m_inputs, m_key, uniforms);
+		m_real = new CombinerProgramImpl(m_key, program, m_useProgram, m_inputs, std::move(uniforms));
+	}
+
+	CombinerKey m_key;
+	CombinerInputs m_inputs;
+	CombinerProgramBuilder::UberVariant * m_uber;
+	GLint m_ops[16];
+	GLint m_flags;
+	GLuint m_pending;
+	CombinerProgramUniformFactory * m_factory;
+	opengl::CachedUseProgram * m_useProgram;
+	CombinerProgramImpl * m_real;
+	int m_delay;
+};
+
+void CombinerProgramBuilder::_startUber(UberVariant & _variant, const CombinerKey & _key, bool _textured, bool _lod, bool _hwl)
+{
+	g_cycleType = _key.getCycleType();
+	g_textureConvert.setMode(_key.getBilerp());
+
+	CombinerInputs inputs;
+	if (_textured) {
+		inputs.addInput(G_GCI_TEXEL0);
+		inputs.addInput(G_GCI_TEXEL1);
+	}
+	inputs.addInput(G_GCI_SHADE);
+	inputs.addInput(G_GCI_NOISE);
+	if (_lod)
+		inputs.addInput(G_GCI_LOD_FRACTION);
+	if (_hwl)
+		inputs.addInput(G_GCI_HW_LIGHT);
+	_variant.inputs = inputs;
+	_variant.key = _key;
+	_variant.handle = _startProgram(_fragmentSource(inputs, _uberCombiner(_textured, _lod), _lod, _textured, _hwl, uberDeclarations),
+		_key.isRectKey(), _textured, false);
+}
+
+/* All of them, before the game needs one. */
+void CombinerProgramBuilder::_buildUbers()
+{
+	const u32 hwlVariants = config.generalEmulation.enableHWLighting != 0 ? 2U : 1U;
+	for (u32 rect = 0; rect < 2; ++rect)
+		for (u32 cycle = 0; cycle < 2; ++cycle)
+			for (u32 textured = 0; textured < 2; ++textured)
+				for (u32 bilerp = 0; bilerp < (textured != 0 ? 4U : 1U); ++bilerp)
+					for (u32 lod = 0; lod < (textured != 0 ? 2U : 1U); ++lod)
+						for (u32 hwl = 0; hwl < (rect == 0 ? hwlVariants : 1U); ++hwl) {
+							gDPCombine combine;
+							combine.mux = 0;
+							combine.muxs0 = (rect | (cycle << 1) | (bilerp << 3)) << 24;
+							_startUber(m_uber[rect][cycle][bilerp][textured][lod][hwl],
+								CombinerKey(combine.mux, false), textured != 0, lod != 0, hwl != 0);
+						}
+
+	for (auto & rect : m_uber)
+		for (auto & cycle : rect)
+			for (auto & bilerp : cycle)
+				for (auto & textured : bilerp)
+					for (auto & lod : textured)
+						for (auto & variant : lod)
+							if (variant.handle != 0)
+								_finishUber(variant);
+}
+
+/* Waits for the driver: only at load, where a compile may be waited for. */
+void CombinerProgramBuilder::_finishUber(UberVariant & _variant)
+{
+	GLint linked = GL_FALSE;
+	glGetProgramiv(_variant.handle, GL_LINK_STATUS, &linked);
+	if (linked == GL_FALSE) {
+		Utils::checkProgramLinkStatus(_variant.handle, true);
+		_variant.failed = true;
+		if (getenv("GLIDEN64_GL_STRICT") != nullptr)
+			abort();
+		return;
+	}
+	char name[32];
+	for (int i = 0; i < 16; ++i) {
+		sprintf(name, "uCmbOps[%d]", i);
+		_variant.opsLoc[i] = glGetUniformLocation(_variant.handle, name);
+	}
+	_variant.flagsLoc = glGetUniformLocation(_variant.handle, "uCmbFlags");
+	CombinerUniforms uniforms;
+	m_uniformFactory->buildUniforms(_variant.handle, _variant.inputs, _variant.key, uniforms);
+	_variant.program = new CombinerProgramImpl(_variant.key, _variant.handle, m_useProgram, _variant.inputs, std::move(uniforms));
+}
+
+/* The variant of the ubershader _key draws with: built at load. */
+CombinerProgramBuilder::UberVariant * CombinerProgramBuilder::_readyUber(const CombinerKey & _key, bool _textured, bool _lod, bool _hwl)
+{
+	UberVariant & v = m_uber[_key.isRectKey() ? 1 : 0][_key.getCycleType()][_textured ? _key.getBilerp() : 0][_textured ? 1 : 0][_lod ? 1 : 0][_hwl ? 1 : 0];
+	return v.program != nullptr ? &v : nullptr;
+}
+
+graphics::CombinerProgram * CombinerProgramBuilder::buildCombinerProgramAsync(Combiner & _color,
+	Combiner & _alpha, const CombinerKey & _key)
+{
+	if (m_uberOff || m_isGLES2 || _key.getCycleType() > G_CYC_2CYCLE)
+		return nullptr;
+
+	g_cycleType = _key.getCycleType();
+	g_textureConvert.setMode(_key.getBilerp());
+
+	gDPCombine combine;
+	combine.mux = _key.getMux();
+
+	std::string strCombiner;
+	CombinerInputs combinerInputs(compileCombiner(_key, _color, _alpha, strCombiner));
+
+	const bool bIsRect = _key.isRectKey();
+	const bool bUseTextures = combinerInputs.usesTexture();
+	const bool bUseLod = combinerInputs.usesLOD();
+	const bool bUseHWLight = !bIsRect && gli_isHWLightingAllowed() && combinerInputs.usesShadeColor();
+	if (bUseHWLight)
+		combinerInputs.addInput(G_GCI_HW_LIGHT);
+	if (bUseLod && !bUseTextures)
+		return nullptr;
+
+	UberVariant * uber = _readyUber(_key, bUseTextures, bUseLod, bUseHWLight);
+	if (uber == nullptr)
+		return nullptr;
+
+	GLint ops[16];
+	graphics::encodeStage(_alpha.stage[0], ops);
+	graphics::encodeStage(_color.stage[0], ops + 4);
+	graphics::encodeStage(_alpha.stage[1], ops + 8);
+	graphics::encodeStage(_color.stage[1], ops + 12);
+
+	GLint flags = 0;
+	if (graphics::combinedAlphaC(g_cycleType, combine))
+		flags |= UBER_ALPHA_C;
+	else if (graphics::combinedAlphaABD(g_cycleType, combine))
+		flags |= UBER_ALPHA_ABD;
+	if (graphics::combinedColorC(g_cycleType, combine))
+		flags |= UBER_COLOR_C;
+	else if (graphics::combinedColorABD(g_cycleType, combine))
+		flags |= UBER_COLOR_ABD;
+	if (_alpha.numStages == 2 && _color.numStages == 2)
+		flags |= UBER_TWO_STAGES;
+
+	GLuint pending = 0;
+	if (!m_uberOnly)
+		pending = _startProgram(_fragmentSource(combinerInputs, strCombiner, bUseLod, bUseTextures, bUseHWLight, nullptr),
+			bIsRect, bUseTextures, false);
+
+	return new CombinerProgramAsync(_key, combinerInputs, uber, ops, flags, pending,
+		m_uniformFactory.get(), m_useProgram, m_uberDelay);
 }
 
 const ShaderPart * CombinerProgramBuilder::getVertexShaderHeader() const
@@ -2480,8 +2738,6 @@ GLuint _createVertexShader(ShaderPart * _header, ShaderPart * _body, ShaderPart 
 	GLuint shader_object = glCreateShader(GL_VERTEX_SHADER);
 	glShaderSource(shader_object, 1, &strShaderData, nullptr);
 	glCompileShader(shader_object);
-	if (!Utils::checkShaderCompileStatus(shader_object))
-		Utils::logErrorShader(GL_VERTEX_SHADER, strShaderData);
 	return shader_object;
 }
 
@@ -2541,10 +2797,38 @@ CombinerProgramBuilder::CombinerProgramBuilder(const opengl::GLInfo & _glinfo, o
 	m_vertexShaderTexturedRect = _createVertexShader(m_vertexHeader.get(), m_vertexTexturedRect.get(), m_vertexEnd.get());
 	m_vertexShaderTexturedTriangle = _createVertexShader(m_vertexHeader.get(), m_vertexTexturedTriangle.get(), m_vertexEnd.get());
 	m_uniformFactory.reset(new CombinerProgramUniformFactory(_glinfo));
+	m_isGLES2 = _glinfo.isGLES2;
+	// Without the driver's own compile threads a key's program would stall the
+	// draw that wants it: those drivers stay on the ubershader until the next load.
+	m_uberOnly = !_glinfo.parallelShaderCompile;
+	// For tools/ci: "off" compiles everything as ever, "delay" holds each program
+	// back for a while, as a driver compiling slowly would, anything else draws
+	// everything with the ubershader.
+	const char * uberEnv = getenv("GLIDEN64_UBERSHADER");
+	if (uberEnv != nullptr && strcmp(uberEnv, "off") == 0)
+		m_uberOff = true;
+	else if (uberEnv != nullptr && strcmp(uberEnv, "delay") == 0)
+		m_uberDelay = 3;
+	else if (uberEnv != nullptr)
+		m_uberOnly = true;
+
+	if (!m_isGLES2 && !m_uberOff)
+		_buildUbers();
 }
 
 CombinerProgramBuilder::~CombinerProgramBuilder()
 {
+	for (auto & rect : m_uber)
+		for (auto & cycle : rect)
+			for (auto & bilerp : cycle)
+				for (auto & textured : bilerp)
+					for (auto & lod : textured)
+						for (auto & v : lod) {
+							delete v.program;
+							if (v.program == nullptr && v.handle != 0)
+								glDeleteProgram(v.handle);
+						}
+
 	glDeleteShader(m_vertexShaderRect);
 	glDeleteShader(m_vertexShaderTriangle);
 	glDeleteShader(m_vertexShaderTexturedRect);

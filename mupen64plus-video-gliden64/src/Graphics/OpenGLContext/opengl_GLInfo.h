@@ -22,6 +22,7 @@ struct GLInfo {
 	bool isGLESX = false;
 	bool imageTextures = false;
 	bool bufferStorage = false;
+	bool parallelShaderCompile = false;
 	bool drawElementsBaseVertex = false;
 	bool texStorage    = false;
 	bool shaderStorage = false;
@@ -37,8 +38,6 @@ struct GLInfo {
 	bool ext_fetch = false;
 	bool ext_fetch_arm = false;
 	bool n64DepthWithFbFetch = false;
-	bool eglImage = false;
-	bool eglImageFramebuffer = false;
 	bool dual_source_blending = false;
 	bool anisotropic_filtering = false;
 	bool coverage = false;

@@ -7,46 +7,27 @@
 #include <vector>
 
 #include <stddef.h>
+#include <string.h>
 
 #include "CRC.h"
+#include "gli_texlru.h"
+#include "gli_tex.h"
 #include "convert.h"
 #include "Graphics/ObjectHandle.h"
 #include "Graphics/Parameter.h"
 
-typedef u32 (*GetTexelFunc)( u64 *src, u16 x, u16 i, u8 palette );
-
-struct CachedTexture
+struct CachedTexture : gli_tex
 {
-	CachedTexture(graphics::ObjectHandle _name) : name(_name), max_level(0), frameBufferTexture(fbNone), bHDTexture(false) {}
+	enum {
+		fbNone = GLI_TEX_FB_NONE,
+		fbOneSample = GLI_TEX_FB_ONE_SAMPLE,
+		fbMultiSample = GLI_TEX_FB_MULTI_SAMPLE
+	};
+
+	CachedTexture() { memset(static_cast<gli_tex *>(this), 0, sizeof(gli_tex)); }
+	CachedTexture(graphics::ObjectHandle _name) : name(_name) { memset(static_cast<gli_tex *>(this), 0, sizeof(gli_tex)); }
 
 	graphics::ObjectHandle name;
-	u64		crc = 0;
-//	float	fulS, fulT;
-//	WORD	ulS, ulT, lrS, lrT;
-	float	offsetS, offsetT;
-	u8		maskS, maskT;
-	u8		clampS, clampT;
-	u8		mirrorS, mirrorT;
-	u16		line;
-	u16		size;
-	u16		format;
-	u32		tMem;
-	u32		palette;
-	u16		width, height;			  // N64 width and height
-	u16		clampWidth, clampHeight;  // Size to clamp to
-	u16		realWidth, realHeight;	  // Actual texture size
-	f32		scaleS, scaleT;			  // Scale to map to 0.0-1.0
-	f32		shiftScaleS, shiftScaleT; // Scale to shift
-	u32		textureBytes;
-
-	u32		address;
-	u8		max_level;
-	enum {
-		fbNone = 0,
-		fbOneSample = 1,
-		fbMultiSample = 2
-	} frameBufferTexture;
-	bool bHDTexture;
 };
 
 
@@ -67,11 +48,15 @@ struct TextureCache
 
 private:
 	TextureCache()
-		: m_pDummy(nullptr)
+		: m_pool(nullptr)
+		, m_pDummy(nullptr)
 		, m_pMSDummy(nullptr)
 		, m_hits(0)
 		, m_misses(0)
 		, m_curUnpackAlignment(4)
+		, m_decodeScratch(nullptr)
+		, m_swapScratch(nullptr)
+		, m_lastHeapDecode(nullptr)
 	{
 		current[0] = nullptr;
 		current[1] = nullptr;
@@ -79,7 +64,6 @@ private:
 	}
 	TextureCache(const TextureCache &) = delete;
 
-	void _checkCacheSize();
 	CachedTexture * _addTexture(u64 _crc);
 	void _load(u32 _tile, CachedTexture *_pTexture);
 	bool _loadHiresTexture(u32 _tile, CachedTexture *_pTexture, u64 & _ricecrc);
@@ -89,21 +73,26 @@ private:
 	void _updateBackground();
 	void _clear();
 	void _initDummyTexture(CachedTexture * _pDummy);
-	void _getTextureDestData(CachedTexture& tmptex, u32* pDest, graphics::Parameter glInternalFormat, GetTexelFunc GetTexel, u16* pLine);
 
-	typedef std::list<CachedTexture> Textures;
-	typedef std::unordered_map<u64, Textures::iterator> Texture_Locations;
 	typedef std::unordered_map<u32, CachedTexture> FBTextures;
-	Textures m_textures;
-	Texture_Locations m_lruTextureLocations;
+	/* The cached textures live in a pool sized at init; the LRU index maps
+	 * keys to its slots. An evicted or dropped slot keeps its GPU texture
+	 * for the next one: deleting one costs ~160us on a tiled GPU. */
+	CachedTexture * m_pool;
+	gli_lru m_lru;
 	FBTextures m_fbTextures;
 	CachedTexture * m_pDummy;
 	CachedTexture * m_pMSDummy;
 	u32 m_hits, m_misses;
 	s32 m_curUnpackAlignment;
-	/* Objects freed by eviction, waiting to be handed to the next texture:
-	 * deleting one costs ~160us on a tiled GPU, reusing it costs nothing. */
-	std::vector<graphics::ObjectHandle> m_freeTextures;
+	u8 * m_decodeScratch;
+	u8 * m_swapScratch;
+	u8 * m_lastHeapDecode;
+
+	bool _decodedIsRead() const;
+	u32 * _takeDecode(u32 _bytes, bool _lend);
+	void _dropDecode(u32 * _p);
+	void _deletePool();
 #ifdef VC
 	const size_t m_maxCacheSize = 1500;
 #else
@@ -118,26 +107,4 @@ inline TextureCache & textureCache()
 	return TextureCache::get();
 }
 
-inline u32 pow2( u32 dim )
-{
-	u32 i = 1;
-
-	while (i < dim) i <<= 1;
-
-	return i;
-}
-
-inline u32 powof( u32 dim )
-{
-	u32 num = 1;
-	u32 i = 0;
-
-	while (num < dim)
-	{
-		num <<= 1;
-		i++;
-	}
-
-	return i;
-}
 #endif

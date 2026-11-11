@@ -1,5 +1,7 @@
 #include "Context.h"
 #include "OpenGLContext/opengl_ContextImpl.h"
+#include "VulkanContext/vk_ContextImpl.h"
+#include "VulkanContext/vk_device.h"
 
 using namespace graphics;
 
@@ -15,8 +17,6 @@ bool Context::IntegerTextures = false;
 bool Context::ClipControl = false;
 bool Context::FramebufferFetch = false;
 bool Context::TextureBarrier = false;
-bool Context::EglImage = false;
-bool Context::EglImageFramebuffer = false;
 bool Context::DualSourceBlending = false;
 
 Context::Context() {}
@@ -28,7 +28,10 @@ Context::~Context() {
 
 void Context::init()
 {
-	m_impl.reset(new opengl::ContextImpl);
+	if (gliden64_vulkan_enabled())
+		m_impl.reset(vulkan::createContextImpl());
+	else
+		m_impl.reset(new opengl::ContextImpl);
 	m_impl->init();
 	m_fbTexFormats.reset(m_impl->getFramebufferTextureFormats());
 	Multisampling = m_impl->isSupported(SpecialFeatures::Multisampling);
@@ -41,8 +44,6 @@ void Context::init()
 	ClipControl = m_impl->isSupported(SpecialFeatures::ClipControl);
 	FramebufferFetch = m_impl->isSupported(SpecialFeatures::FramebufferFetch);
 	TextureBarrier = m_impl->isSupported(SpecialFeatures::TextureBarrier);
-	EglImage = m_impl->isSupported(SpecialFeatures::EglImage);
-	EglImageFramebuffer = m_impl->isSupported(SpecialFeatures::EglImageFramebuffer);
 	DualSourceBlending = m_impl->isSupported(SpecialFeatures::DualSourceBlending);
 }
 
@@ -157,6 +158,11 @@ void Context::bindTexture(const BindTextureParameters & _params)
 	m_impl->bindTexture(_params);
 }
 
+void * Context::lendTextureData(size_t _bytes)
+{
+	return m_impl->lendTextureData(_bytes);
+}
+
 void Context::setTextureUnpackAlignment(s32 _param)
 {
 	m_impl->setTextureUnpackAlignment(_param);
@@ -257,9 +263,19 @@ bool Context::isCombinerProgramBuilderObsolete()
 
 }
 
+bool Context::isCombinerUberOnly()
+{
+	return m_impl->isCombinerUberOnly();
+}
+
 void Context::resetCombinerProgramBuilder()
 {
 	m_impl->resetCombinerProgramBuilder();
+}
+
+CombinerProgram * Context::createCombinerProgramAsync(Combiner & _color, Combiner & _alpha, const CombinerKey & _key)
+{
+	return m_impl->createCombinerProgramAsync(_color, _alpha, _key);
 }
 
 CombinerProgram * Context::createCombinerProgram(Combiner & _color, Combiner & _alpha, const CombinerKey & _key)
@@ -270,6 +286,11 @@ CombinerProgram * Context::createCombinerProgram(Combiner & _color, Combiner & _
 bool Context::saveShadersStorage(const Combiners & _combiners)
 {
 	return m_impl->saveShadersStorage(_combiners);
+}
+
+std::string Context::getCombinerJournalPath(u32 & _version)
+{
+	return m_impl->getCombinerJournalPath(_version);
 }
 
 bool Context::loadShadersStorage(Combiners & _combiners)

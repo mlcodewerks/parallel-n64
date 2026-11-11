@@ -1,25 +1,21 @@
 #ifndef TEXTUREFILTERHANDLER_H
 #define TEXTUREFILTERHANDLER_H
 
+#include <boolean.h>
 #include "Types.h"
 
-class TextureFilterHandler
-{
-public:
-	TextureFilterHandler() : m_inited(0), m_options(0) {}
-	// It's not safe to call shutdown() in destructor, because texture filter has its own static objects, which can be destroyed first.
-	~TextureFilterHandler() { shutdown(); }
-	void init();
-	void shutdown();
-	void dumpcache();
-	bool isInited() const { return m_inited != 0; }
-	bool optionsChanged() const { return _getConfigOptions() != m_options; }
-private:
-	u32 _getConfigOptions() const;
-	u32 m_inited;
-	u32 m_options;
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-extern TextureFilterHandler TFH;
+void gli_TFH_init(void);
+void gli_TFH_shutdown(void);
+void gli_TFH_dumpcache(void);
+bool gli_TFH_is_inited(void);
+bool gli_TFH_options_changed(void);
 
-#endif // TEXTUREFILTERHANDLER_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TEXTUREFILTERHANDLER_H */

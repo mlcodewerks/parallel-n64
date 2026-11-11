@@ -111,14 +111,19 @@ namespace opengl {
 		/*---------------Shaders-------------*/
 
 		bool isCombinerProgramBuilderObsolete() override;
+		bool isCombinerUberOnly() override;
 
 		void resetCombinerProgramBuilder() override;
 
 		graphics::CombinerProgram * createCombinerProgram(Combiner & _color, Combiner & _alpha, const CombinerKey & _key) override;
 
+		graphics::CombinerProgram * createCombinerProgramAsync(Combiner & _color, Combiner & _alpha, const CombinerKey & _key) override;
+
 		bool saveShadersStorage(const graphics::Combiners & _combiners) override;
 
 		bool loadShadersStorage(graphics::Combiners & _combiners) override;
+
+		std::string getCombinerJournalPath(u32 & _version) override;
 
 		graphics::ShaderProgram * createDepthFogShader() override;
 

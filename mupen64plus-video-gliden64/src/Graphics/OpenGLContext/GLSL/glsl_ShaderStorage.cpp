@@ -8,7 +8,6 @@
 #include <Graphics/Context.h>
 #include <Graphics/OpenGLContext/opengl_Utils.h>
 #include <Types.h>
-#include <Log.h>
 #include <RSP.h>
 #include <PluginAPI.h>
 #include <Combiner.h>
@@ -35,7 +34,7 @@ std::string getStorageFileName(const opengl::GLInfo & _glinfo, const char * _fil
 	} setLocale;
 
 	wchar_t strCacheFolderPath[PLUGIN_PATH_SIZE];
-	api().GetUserCachePath(strCacheFolderPath);
+	gli_api_user_cache_path(strCacheFolderPath);
 
 	// Convert wchar string to multibyte string
 	// Use large enough buffer to hold multibyte conversion of wchar string
@@ -99,7 +98,7 @@ bool ShaderStorage::_saveCombinerKeys(const graphics::Combiners & _combiners) co
 
 	std::sort(keysData.begin(), keysData.end());
 	keysOut << "0x" << std::hex << std::setfill('0') << std::setw(8) << m_keysFormatVersion << "\n";
-	keysOut << "0x" << std::hex << std::setfill('0') << std::setw(8) << static_cast<u32>(GBI.isHWLSupported()) << "\n";
+	keysOut << "0x" << std::hex << std::setfill('0') << std::setw(8) << static_cast<u32>(gli_GBI_hwlSupported) << "\n";
 	keysOut << "0x" << std::hex << std::setfill('0') << std::setw(8) << keysData.size() << "\n";
 	for (u64 key : keysData)
 		keysOut << "0x" << std::hex << std::setfill('0') << std::setw(16) << key << "\n";
@@ -131,6 +130,10 @@ bool ShaderStorage::saveShadersStorage(const graphics::Combiners & _combiners) c
 
 	if (!graphics::Context::ShaderProgramBinary)
 		// Shaders storage is not supported, but we saved combiners keys.
+		return true;
+
+	if (glGetString(GL_RENDERER) == nullptr)
+		// No current context any more; but we saved combiners keys.
 		return true;
 
 	std::string shadersFileName = getStorageFileName(m_glinfo, "shaders");
@@ -173,11 +176,6 @@ bool ShaderStorage::saveShadersStorage(const graphics::Combiners & _combiners) c
 			allShaderData.insert(allShaderData.end(), data.begin(), data.end());
 			++totalWritten;
 		}
-		else
-		{
-			LOG(LOG_ERROR, "Error while writing shader with key key=0x%016lX",
-				static_cast<long unsigned int>(cur->second->getKey().getMux()));
-		}
 	}
 
 	shadersOut.write((char*)&totalWritten, sizeof(totalWritten));
@@ -213,7 +211,7 @@ CombinerProgramImpl * _readCominerProgramFromStream(std::istream & _is,
 		return nullptr;
 	}
 
-	UniformGroups uniforms;
+	CombinerUniforms uniforms;
 	_uniformFactory.buildUniforms(program, cmbInputs, _cmbKey, uniforms);
 
 	return new CombinerProgramImpl(_cmbKey, program, _useProgram, cmbInputs, std::move(uniforms));
@@ -237,7 +235,7 @@ bool ShaderStorage::_loadFromCombinerKeys(graphics::Combiners & _combiners)
 
 	u32 hwlSupport;
 	fin >> std::hex >> hwlSupport;
-	GBI.setHWLSupported(hwlSupport != 0);
+	gli_GBI_hwlSupported = hwlSupport != 0;
 
 	u32 szCombiners;
 	fin >> std::hex >> szCombiners;
@@ -317,7 +315,6 @@ bool ShaderStorage::loadShadersStorage(graphics::Combiners & _combiners)
 				pCombiner->update(true);
 				_combiners[pCombiner->getKey()] = pCombiner;
 			} else {
-				LOG(LOG_ERROR, "Shader is not a valid binary, compiling from key instead");
 				graphics::CombinerProgram * pCombinerFromKey = Combiner_Compile(cmbKey);
 				pCombinerFromKey->update(true);
 				_combiners[cmbKey] = pCombinerFromKey;
@@ -325,13 +322,18 @@ bool ShaderStorage::loadShadersStorage(graphics::Combiners & _combiners)
 
 		}
 	} catch (...) {
-		LOG(LOG_ERROR, "Stream error while loading shader cache! Buffer is probably not big enough");
 	}
 
 	fin.close();
 	return !opengl::Utils::isGLError();
 }
 
+
+std::string ShaderStorage::getKeysJournalPath(u32 & _version) const
+{
+	_version = m_keysFormatVersion;
+	return getStorageFileName(m_glinfo, "keys.journal");
+}
 
 ShaderStorage::ShaderStorage(const opengl::GLInfo & _glinfo, opengl::CachedUseProgram * _useProgram)
 : m_glinfo(_glinfo)

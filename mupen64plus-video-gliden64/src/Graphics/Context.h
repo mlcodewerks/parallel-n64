@@ -26,8 +26,6 @@ namespace graphics {
 		ClipControl,
 		FramebufferFetch,
 		TextureBarrier,
-		EglImage,
-		EglImageFramebuffer,
 		DualSourceBlending
 	};
 
@@ -121,6 +119,8 @@ namespace graphics {
 		};
 
 		void update2DTexture(const UpdateTextureDataParams & _params);
+
+		void * lendTextureData(size_t _bytes);
 
 		struct TexParameters {
 			ObjectHandle handle;
@@ -227,13 +227,21 @@ namespace graphics {
 
 		bool isCombinerProgramBuilderObsolete();
 
+		bool isCombinerUberOnly();
+
 		void resetCombinerProgramBuilder();
 
 		CombinerProgram * createCombinerProgram(Combiner & _color, Combiner & _alpha, const CombinerKey & _key);
 
+		/* nullptr when it cannot be done without waiting */
+		CombinerProgram * createCombinerProgramAsync(Combiner & _color, Combiner & _alpha, const CombinerKey & _key);
+
 		bool saveShadersStorage(const Combiners & _combiners);
 
 		bool loadShadersStorage(Combiners & _combiners);
+
+		/* where the keys met this session go, and their format's version */
+		std::string getCombinerJournalPath(u32 & _version);
 
 		ShaderProgram * createDepthFogShader();
 
@@ -298,8 +306,6 @@ namespace graphics {
 		static bool ClipControl;
 		static bool FramebufferFetch;
 		static bool TextureBarrier;
-		static bool EglImage;
-		static bool EglImageFramebuffer;
 		static bool DualSourceBlending;
 
 	private:

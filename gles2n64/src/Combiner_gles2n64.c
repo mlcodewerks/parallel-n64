@@ -1,7 +1,12 @@
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include "../../mupen64plus-video-gliden64/src/CombinerKeyJournal.h"
+#include "../../mupen64plus-video-gliden64/src/CombinerKeyPath.h"
 #include "OpenGL.h"
 #include "Combiner.h"
+#include "ShaderCombiner.h"
+#include "N64.h"
 #include "Common.h"
 #include "Textures.h"
 #include "Config.h"
@@ -118,6 +123,8 @@ static bool mux_replace(DecodedMux *dmux, int cycle, int src, int dest)
  * used to be heap-allocated and freed by the only caller within the
  * same call (and dereferenced before any NULL check - issue #543);
  * the struct is small and short-lived, so build it on the stack. */
+#define COMBINER_JOURNAL_VERSION 1u
+
 static void mux_init(DecodedMux *mux, uint64_t dmux, bool cycle2)
 {
    int i;
@@ -231,9 +238,22 @@ static void mux_init(DecodedMux *mux, uint64_t dmux, bool cycle2)
 
 }
 
+static void Combiner_PrebuildKey(void *ctx, uint64_t key, unsigned flags)
+{
+   DecodedMux dmux;
+   (void)ctx;
+   mux_init(&dmux, key, (int)flags & SC_2CYCLE);
+   ShaderCombiner_Prebuild(&dmux, (int)flags);
+}
+
 void Combiner_Init(void)
 {
+   char path[PATH_MAX_LENGTH];
+
    ShaderCombiner_Init();
+   combiner_key_path(path, sizeof(path), "gln64", gfx_info.HEADER);
+   combiner_journal_read(path, COMBINER_JOURNAL_VERSION, Combiner_PrebuildKey, NULL);
+   ShaderCombiner_OpenJournal(path);
 }
 
 void Combiner_Destroy(void)

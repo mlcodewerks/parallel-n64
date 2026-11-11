@@ -1,6 +1,8 @@
 #pragma once
 #include <memory>
 #include <Combiner.h>
+#include <Graphics/OpenGLContext/GLFunctions.h>
+#include "glsl_CombinerInputs.h"
 #include <Graphics/OpenGLContext/opengl_GLInfo.h>
 
 namespace graphics {
@@ -16,6 +18,8 @@ namespace glsl {
 	class ShaderPart;
 	class CombinerInputs;
 	class CombinerProgramUniformFactory;
+	class CombinerProgramImpl;
+	class CombinerProgramAsync;
 
 	class CombinerProgramBuilder
 	{
@@ -31,10 +35,44 @@ namespace glsl {
 
 		const ShaderPart * getFragmentShaderEnd() const;
 
+		/* Draws with the ubershader, built at load, and starts the key's own
+		 * program where the driver compiles on its own threads; nullptr when
+		 * the ubershader cannot draw this key. */
+		graphics::CombinerProgram * buildCombinerProgramAsync(Combiner & _color, Combiner & _alpha, const CombinerKey & _key);
+
 		bool isObsolete() const;
+
+		bool isUberOnly() const { return m_uberOnly && !m_uberOff && !m_isGLES2; }
+
+		struct UberVariant
+		{
+			GLuint handle = 0;
+			bool failed = false;
+			CombinerProgramImpl * program = nullptr;
+			CombinerProgramAsync * owner = nullptr;
+			GLint opsLoc[16];
+			GLint flagsLoc = -1;
+			CombinerInputs inputs;
+			CombinerKey key;
+		};
 
 	private:
 		CombinerInputs compileCombiner(const CombinerKey & _key, Combiner & _color, Combiner & _alpha, std::string & _strShader);
+		std::string _fragmentSource(const CombinerInputs & combinerInputs, const std::string & strCombiner,
+			bool bUseLod, bool bUseTextures, bool bUseHWLight, const char * _uberDeclarations);
+		GLuint _startProgram(const std::string & _fragment, bool bIsRect, bool bUseTextures, bool _check);
+		std::string _uberCombiner(bool _textured, bool _lod);
+		UberVariant * _readyUber(const CombinerKey & _key, bool _textured, bool _lod, bool _hwl);
+		void _startUber(UberVariant & _variant, const CombinerKey & _key, bool _textured, bool _lod, bool _hwl);
+		void _finishUber(UberVariant & _variant);
+		void _buildUbers();
+
+		// [rect][cycle: 1, 2][bilerp][textured][lod][hardware lighting]
+		UberVariant m_uber[2][2][4][2][2][2];
+		bool m_isGLES2 = false;
+		bool m_uberOff = false;
+		bool m_uberOnly = false;
+		int m_uberDelay = 0;
 
 		typedef std::unique_ptr<ShaderPart> ShaderPartPtr;
 		ShaderPartPtr m_blender1;

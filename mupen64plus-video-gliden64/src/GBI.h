@@ -1,11 +1,15 @@
 #ifndef GBI_H
 #define GBI_H
 
-#include <list>
+#include <boolean.h>
 
 #include "Types.h"
 
-// Microcode Types
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Microcode Types */
 #define F3D				0
 #define F3DEX			1
 #define F3DEX2			2
@@ -39,7 +43,7 @@
 #define F3DEX095		30
 #define NONE			31
 
-// Fixed point conversion factors
+/* Fixed point conversion factors */
 #define FIXED2FLOATRECIP1	0.5f
 #define FIXED2FLOATRECIP2	0.25f
 #define FIXED2FLOATRECIP3	0.125f
@@ -58,23 +62,23 @@
 #define FIXED2FLOATRECIP16	1.52587890625e-05f
 
 #define _FIXED2FLOAT( v, b ) \
-	(static_cast<f32>(v) * FIXED2FLOATRECIP##b)
+	((f32)(v) * FIXED2FLOATRECIP##b)
 
 #define FIXED2FLOATRECIPCOLOR5	3.22580635547637939453125e-02f
 #define FIXED2FLOATRECIPCOLOR7	7.8740157186985015869140625e-03f
 #define FIXED2FLOATRECIPCOLOR8	3.9215688593685626983642578125e-03f
 
 #define _FIXED2FLOATCOLOR( v, b ) \
-	(static_cast<f32>(v) * FIXED2FLOATRECIPCOLOR##b)
+	((f32)(v) * FIXED2FLOATRECIPCOLOR##b)
 
 
-// Useful macros for decoding GBI command's parameters
+/* Useful macros for decoding GBI command's parameters */
 #define _SHIFTL( v, s, w )	\
-	((static_cast<u32>(v) & ((0x01 << w) - 1)) << s)
+	(((u32)(v) & ((0x01 << w) - 1)) << s)
 #define _SHIFTR( v, s, w )	\
-	((static_cast<u32>(v) >> s) & ((0x01 << w) - 1))
+	(((u32)(v) >> s) & ((0x01 << w) - 1))
 
-// These are all the constant flags
+/* These are all the constant flags */
 #define G_ZBUFFER				0x00000001
 #define G_SHADE					0x00000004
 #define G_ACCLAIM_LIGHTING		0x00000080
@@ -175,7 +179,7 @@
 #define G_MWO_POINT_XYSCREEN	0x18
 #define G_MWO_POINT_ZSCREEN		0x1C
 
-// These flags change between ucodes
+/* These flags change between ucodes */
 extern u32 G_MTX_STACKSIZE;
 
 extern u32 G_MTX_MODELVIEW;
@@ -203,30 +207,30 @@ extern u32 G_MWO_aLIGHT_6, G_MWO_bLIGHT_6;
 extern u32 G_MWO_aLIGHT_7, G_MWO_bLIGHT_7;
 extern u32 G_MWO_aLIGHT_8, G_MWO_bLIGHT_8;
 
-// Image formats
+/* Image formats */
 #define G_IM_FMT_RGBA	0
 #define G_IM_FMT_YUV	1
 #define G_IM_FMT_CI		2
 #define G_IM_FMT_IA		3
 #define G_IM_FMT_I		4
 
-// Image sizes
+/* Image sizes */
 #define G_IM_SIZ_4b		0
 #define G_IM_SIZ_8b		1
 #define G_IM_SIZ_16b	2
 #define G_IM_SIZ_32b	3
 #define G_IM_SIZ_DD		5
 
-#define G_TX_NOMIRROR			0x00	// 0 << 0
+#define G_TX_NOMIRROR			0x00	/* 0 << 0 */
 #define G_TX_MIRROR				0x01
-#define G_TX_WRAP				0x00	// 0 << 1
+#define G_TX_WRAP				0x00	/* 0 << 1 */
 #define G_TX_CLAMP				0x02
 
 #define G_NOOP					0x00
 
 #define	G_IMMFIRST				-65
 
-// These GBI commands are common to all ucodes
+/* These GBI commands are common to all ucodes */
 #define	G_SETCIMG				0xFF	/*  -1 */
 #define	G_SETZIMG				0xFE	/*  -2 */
 #define	G_SETTIMG				0xFD	/*  -3 */
@@ -374,7 +378,7 @@ extern u32 G_MWO_aLIGHT_8, G_MWO_bLIGHT_8;
 #define	CVG_X_ALPHA				1
 #define	ALPHA_CVG_SEL			1
 #define	FORCE_BL				1
-#define	TEX_EDGE				0 // not used
+#define	TEX_EDGE				0 /* not used */
 
 #define	G_SC_NON_INTERLACE		0
 #define	G_SC_EVEN_INTERLACE		2
@@ -428,7 +432,7 @@ typedef struct
 	s16 t;
 	s16 s;
 
-	union {
+	GLI_ANON union {
 		struct
 		{
 			u8 a;
@@ -439,9 +443,9 @@ typedef struct
 		struct
 		{
 			s8 a;
-			s8 z;	// b
-			s8 y;	//g
-			s8 x;	//r
+			s8 z;	/* b */
+			s8 y;	/*g */
+			s8 x;	/*r */
 		} normal;
 	};
 } Vertex;
@@ -469,6 +473,7 @@ typedef struct
 	s16 z;
 } SWVertex;
 
+typedef struct Light Light;
 struct Light
 {
 	u8 pad0, b, g, r;
@@ -476,72 +481,46 @@ struct Light
 	s8 pad2, z, y, x;
 };
 
-// GBI commands
+/* GBI commands */
 typedef void (*GBIFunc)( u32 w0, u32 w1 );
 
-struct MicrocodeInfo
+extern GBIFunc gli_GBIcmd[256];
+extern u32 gli_GBIPCStackSize;
+
+typedef struct MicrocodeInfo
 {
-	u32 address = 0;
-	u32 dataAddress = 0;;
-	u16 dataSize = 0;
-	u32 type = NONE;
-	bool NoN = false;
-	bool Rej = false;
-	bool cullBoth = true;
-	bool negativeY = true;
-	bool fast3DPersp = false;
-	bool texturePersp = true;
-	bool combineMatrices = false;
+	u32 address;
+	u32 dataAddress;
+	u16 dataSize;
+	u32 type;
+	bool NoN;
+	bool Rej;
+	bool cullBoth;
+	bool negativeY;
+	bool fast3DPersp;
+	bool texturePersp;
+	bool combineMatrices;
 	struct
 	{
-		// LVP is how microcodes other than F3DEX3 function
-		bool legacyVertexPipeline = true;
-		bool noOcclusionPlane = false;
-		bool branchOnZ = false;
+		/* LVP is how microcodes other than F3DEX3 function */
+		bool legacyVertexPipeline;
+		bool noOcclusionPlane;
+		bool branchOnZ;
 	} f3dex3;
-};
+} MicrocodeInfo;
 
-struct GBIInfo
-{
-	GBIFunc cmd[256];
+/* The current microcode, never NULL */
+extern const MicrocodeInfo * gli_GBI;
+extern bool gli_GBI_hwlSupported;
 
-	u32 PCStackSize;
+void gli_GBI_init(void);
+void gli_GBI_destroy(void);
+void gli_GBI_loadMicrocode(u32 uc_start, u32 uc_dstart, u16 uc_dsize);
 
-	void init();
-	void destroy();
-	void loadMicrocode(u32 uc_start, u32 uc_dstart, u16 uc_dsize);
-	u32 getMicrocodeType() const {return m_pCurrent != nullptr ? m_pCurrent->type : NONE;}
-	bool isHWLSupported() const;
-	void setHWLSupported(bool _supported);
-	bool isNoN() const { return m_pCurrent != nullptr ? m_pCurrent->NoN : false; }
-	bool isRej() const { return m_pCurrent != nullptr ? m_pCurrent->Rej : false; }
-	bool isCullBoth() const { return m_pCurrent != nullptr ? m_pCurrent->cullBoth : false; }
-	bool isNegativeY() const { return m_pCurrent != nullptr ? m_pCurrent->negativeY : true; }
-	bool isTexturePersp() const { return m_pCurrent != nullptr ? m_pCurrent->texturePersp: true; }
-	bool isCombineMatrices() const { return m_pCurrent != nullptr ? m_pCurrent->combineMatrices: false; }
-	bool isLegacyVertexPipeline() const { return m_pCurrent != nullptr ? m_pCurrent->f3dex3.legacyVertexPipeline : true; }
-	bool isNoOcclusionPlane() const { return m_pCurrent != nullptr ? m_pCurrent->f3dex3.noOcclusionPlane : false; }
-	bool isBranchOnZ() const { return m_pCurrent != nullptr ? m_pCurrent->f3dex3.branchOnZ : false; }
-
-private:
-	void _flushCommands();
-
-	void _makeCurrent(MicrocodeInfo * _pCurrent);
-	bool _makeExistingMicrocodeCurrent(u32 uc_start, u32 uc_dstart, u32 uc_dsize);
-
-	bool m_hwlSupported;
-	MicrocodeInfo * m_pCurrent;
-
-	typedef std::list<MicrocodeInfo> Microcodes;
-	Microcodes m_list;
-};
-
-extern GBIInfo GBI;
-
-// Allows easier setting of GBI commands
+/* Allows easier setting of GBI commands */
 #define GBI_SetGBI( command, value, function ) \
 	command = value; \
-	GBI.cmd[command] = function
+	gli_GBIcmd[command] = function
 
 #define GBI_InitFlags( ucode ) \
 	G_MTX_STACKSIZE		= ucode##_MTX_STACKSIZE; \
@@ -577,6 +556,10 @@ extern GBIInfo GBI;
 	G_MWO_bLIGHT_7		= ucode##_MWO_bLIGHT_7; \
 	G_MWO_aLIGHT_8		= ucode##_MWO_aLIGHT_8; \
 	G_MWO_bLIGHT_8		= ucode##_MWO_bLIGHT_8;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

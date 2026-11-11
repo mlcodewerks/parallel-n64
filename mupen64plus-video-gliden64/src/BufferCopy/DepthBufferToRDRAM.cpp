@@ -5,7 +5,6 @@
 
 #include "DepthBufferToRDRAM.h"
 #include "WriteToRDRAM.h"
-#include "MemoryStatus.h"
 
 #include <FrameBuffer.h>
 #include <DepthBuffer.h>
@@ -207,7 +206,7 @@ bool DepthBufferToRDRAM::_prepareCopy(u32& _startAddress, bool _copyChunk)
 
 u16 DepthBufferToRDRAM::_FloatToUInt16(f32 _z)
 {
-	static const u16 * const zLUT = depthBufferList().getZLUT();
+	static const u16 * const zLUT = gli_depth_zlut();
 	u32 idx = 0x3FFFF;
 
 	if (_z < 0.0f) {
@@ -277,13 +276,10 @@ bool DepthBufferToRDRAM::_copy(u32 _startAddress, u32 _endAddress)
 
 bool DepthBufferToRDRAM::copyToRDRAM(u32 _address)
 {
-	if (config.frameBufferEmulation.copyDepthToRDRAM == Config::cdSoftwareRender)
+	if (config.frameBufferEmulation.copyDepthToRDRAM == cdSoftwareRender)
 		return true;
 
 	if (!m_pbuf)
-		return false;
-
-	if (!isMemoryWritable(RDRAM + _address, gDP.colorImage.width * 2))
 		return false;
 
 	if (!_prepareCopy(_address, false))
@@ -297,16 +293,13 @@ bool DepthBufferToRDRAM::copyToRDRAM(u32 _address)
 
 bool DepthBufferToRDRAM::copyChunkToRDRAM(u32 _startAddress)
 {
-	if (config.frameBufferEmulation.copyDepthToRDRAM == Config::cdSoftwareRender)
+	if (config.frameBufferEmulation.copyDepthToRDRAM == cdSoftwareRender)
 		return true;
 
 	if (!m_pbuf)
 		return false;
 
 	const u32 endAddress = (_startAddress & ~0xfff) + 0x1000;
-
-	if (!isMemoryWritable(RDRAM + _startAddress, endAddress - _startAddress))
-		return false;
 
 	if (!_prepareCopy(_startAddress, true))
 		return false;

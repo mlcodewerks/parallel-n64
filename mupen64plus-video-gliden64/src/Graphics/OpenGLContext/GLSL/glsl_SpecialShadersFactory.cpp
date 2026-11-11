@@ -1,3 +1,4 @@
+#include <string>
 #include <assert.h>
 #include <N64.h>
 #include <FrameBuffer.h>
@@ -172,7 +173,7 @@ namespace glsl {
 					"  lowp vec4 c0 = TEX_OFFSET(offset);																			\n"
 					"  c0 = c * vec4(equal(c0, uTestColor)) + c0 * vec4(notEqual(c0, uTestColor));									\n"
 					"  lowp vec4 c1 = TEX_OFFSET(vec2(offset.x - sign(offset.x), offset.y));										\n"
-					"  c0 = c * vec4(equal(c1, uTestColor)) + c1 * vec4(notEqual(c1, uTestColor));									\n"
+					"  c1 = c * vec4(equal(c1, uTestColor)) + c1 * vec4(notEqual(c1, uTestColor));									\n"
 					"  lowp vec4 c2 = TEX_OFFSET(vec2(offset.x, offset.y - sign(offset.y)));										\n"
 					"  c2 = c * vec4(equal(c2, uTestColor)) + c2 * vec4(notEqual(c2, uTestColor));									\n"
 					"  return c0 + abs(offset.x)*(c1-c0) + abs(offset.y)*(c2-c0);													\n"
@@ -479,7 +480,7 @@ namespace glsl {
 			glUniform1i(m_locTlut, int(graphics::textureIndices::PaletteTex));
 			glUniform1i(m_locDepthImage, 0);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			g_paletteTexture.update();
+			gli_palette_update();
 		}
 
 	private:
