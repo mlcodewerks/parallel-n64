@@ -357,6 +357,7 @@ SOURCES_C += $(LIBRETRO_COMM_DIR)/streams/file_stream.c \
 				 $(LIBRETRO_COMM_DIR)/string/rstrtod.c \
 				 $(LIBRETRO_COMM_DIR)/file/file_path.c \
 				 $(LIBRETRO_COMM_DIR)/file/file_path_io.c \
+				 $(LIBRETRO_COMM_DIR)/file/retro_dirent.c \
 				 $(LIBRETRO_COMM_DIR)/time/rtime.c
 
 ifeq ($(HAVE_OPENGL),1)
@@ -393,6 +394,8 @@ SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TextureLRU.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/VIUpdate.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/FrameBufferRdram.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/FrameBufferList.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/RdramWrite.c
+SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/RdramToColor.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/TriangleList.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DrawerViewport.c
 SOURCES_C     += $(VIDEODIR_GLIDEN64)/src/DrawerStates.c
@@ -496,7 +499,6 @@ SOURCES_CXX   += \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TextureFilters_hq4x.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TextureFilters_xbrz.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxCache.cpp \
-	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxDbg.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxFilter.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxFilterExport.cpp \
 	$(VIDEODIR_GLIDEN64)/src/GLideNHQ/TxGz.cpp \
@@ -509,12 +511,6 @@ SOURCES_CXX   += \
 
 # GLideNHQ's persistent filter/quantize pool (C89)
 SOURCES_C += $(VIDEODIR_GLIDEN64)/src/GLideNHQ/txpool.c
-
-ifneq (,$(findstring win,$(platform)))
-	SOURCES_C += $(VIDEODIR_GLIDEN64)/src/osal/osal_files_win32.c
-else
-	SOURCES_C += $(VIDEODIR_GLIDEN64)/src/osal/osal_files_unix.c
-endif
 
 ifeq ($(HAVE_NEON),1)
 	SOURCES_CXX   += $(VIDEODIR_GLIDEN64)/src/Neon/3DMathNeon.cpp \

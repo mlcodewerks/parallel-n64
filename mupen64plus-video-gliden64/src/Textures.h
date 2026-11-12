@@ -1,8 +1,6 @@
 #ifndef TEXTURES_H
 #define TEXTURES_H
 
-#include <map>
-#include <unordered_map>
 #include <list>
 #include <vector>
 
@@ -55,11 +53,11 @@ private:
 		, m_misses(0)
 		, m_curUnpackAlignment(4)
 		, m_decodeScratch(nullptr)
-		, m_swapScratch(nullptr)
 		, m_lastHeapDecode(nullptr)
 	{
 		current[0] = nullptr;
 		current[1] = nullptr;
+		_resetFBTextureSlots();
 		CRC_Init();
 	}
 	TextureCache(const TextureCache &) = delete;
@@ -74,19 +72,25 @@ private:
 	void _clear();
 	void _initDummyTexture(CachedTexture * _pDummy);
 
-	typedef std::unordered_map<u32, CachedTexture> FBTextures;
 	/* The cached textures live in a pool sized at init; the LRU index maps
 	 * keys to its slots. An evicted or dropped slot keeps its GPU texture
 	 * for the next one: deleting one costs ~160us on a tiled GPU. */
 	CachedTexture * m_pool;
 	gli_lru m_lru;
-	FBTextures m_fbTextures;
+	/* The frame buffer, depth buffer and other uncached textures: fixed
+	 * slots and a stack of the free ones, so nothing is allocated as frame
+	 * buffers come and go. Room for every frame buffer and depth buffer
+	 * alive at once with all their textures, and the few others. */
+	enum { FBTextureSlots = 4 * 128 + 5 * 64 + 64 };
+	CachedTexture m_fbTextures[FBTextureSlots];
+	u16 m_fbFree[FBTextureSlots];
+	u32 m_fbFreeCount;
+	void _resetFBTextureSlots();
 	CachedTexture * m_pDummy;
 	CachedTexture * m_pMSDummy;
 	u32 m_hits, m_misses;
 	s32 m_curUnpackAlignment;
 	u8 * m_decodeScratch;
-	u8 * m_swapScratch;
 	u8 * m_lastHeapDecode;
 
 	bool _decodedIsRead() const;

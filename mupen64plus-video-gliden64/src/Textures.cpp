@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdint.h>
 #include <memory.h>
 #include <algorithm>
 #include "Platform.h"
@@ -18,6 +19,8 @@
 #include "Graphics/Parameters.h"
 #include "DisplayWindow.h"
 #include "gli_textures.h"
+#include "gli_fb_list.h"
+#include "DepthBuffer.h"
 #include "gli_texdecode.h"
 
 using namespace std;
@@ -76,7 +79,6 @@ void TextureCache::init()
 		m_pool = new CachedTexture[m_maxCacheSize];
 		gli_lru_init(&m_lru, (u32)m_maxCacheSize);
 	}
-	m_swapScratch = (u8*)malloc(DecodeScratchBytes);
 
 	u32 dummyTexture[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
@@ -159,17 +161,33 @@ void TextureCache::destroy()
 {
 	current[0] = current[1] = nullptr;
 	free(m_decodeScratch);
-	free(m_swapScratch);
-	m_decodeScratch = m_swapScratch = nullptr;
+	m_decodeScratch = nullptr;
 
 	_deletePool();
 	delete[] m_pool;
 	m_pool = nullptr;
 	gli_lru_deinit(&m_lru);
 
-	for (FBTextures::const_iterator cur = m_fbTextures.cbegin(); cur != m_fbTextures.cend(); ++cur)
-		gfxContext.deleteTexture(cur->second.name);
-	m_fbTextures.clear();
+	/* the slots in use: the free stack marks the others */
+	bool isFree[FBTextureSlots] = {};
+	for (u32 i = 0; i < m_fbFreeCount; ++i)
+		isFree[m_fbFree[i]] = true;
+	for (u32 i = 0; i < FBTextureSlots; ++i)
+		if (!isFree[i])
+			gfxContext.deleteTexture(m_fbTextures[i].name);
+	_resetFBTextureSlots();
+}
+
+void TextureCache::_resetFBTextureSlots()
+{
+	static_assert(FBTextureSlots >= 4 * GLI_FB_MAX + 5 * GLI_DEPTH_MAX + 16, "a frame buffer has four textures, a depth buffer five");
+	static_assert(FBTextureSlots <= 0x10000, "slots are u16");
+	for (u32 i = 0; i < FBTextureSlots; ++i) {
+		m_fbTextures[i] = CachedTexture();
+		/* taken from the top: slot 0 first */
+		m_fbFree[i] = (u16)(FBTextureSlots - 1 - i);
+	}
+	m_fbFreeCount = FBTextureSlots;
 }
 
 /* Deletes every pooled GPU texture, cached or kept for reuse */
@@ -203,17 +221,29 @@ void TextureCache::removeFrameBufferTexture(CachedTexture * _pTexture)
 {
 	if (_pTexture == nullptr)
 		return;
-	FBTextures::const_iterator iter = m_fbTextures.find(u32(_pTexture->name));
-	assert(iter != m_fbTextures.cend());
-	gfxContext.deleteTexture(ObjectHandle(iter->second.name));
-	m_fbTextures.erase(iter);
+	gfxContext.deleteTexture(_pTexture->name);
+	const uintptr_t offset = reinterpret_cast<uintptr_t>(_pTexture) - reinterpret_cast<uintptr_t>(m_fbTextures);
+	if (offset >= sizeof(m_fbTextures)) {
+		/* one past the slots, from the heap */
+		delete _pTexture;
+		return;
+	}
+	const u32 slot = (u32)(offset / sizeof(CachedTexture));
+	m_fbTextures[slot] = CachedTexture();
+	m_fbFree[m_fbFreeCount++] = (u16)slot;
 }
 
 CachedTexture * TextureCache::addFrameBufferTexture(graphics::Parameter _target)
 {
 	ObjectHandle texName(gfxContext.createTexture(_target));
-	m_fbTextures.emplace(u32(texName), texName);
-	return &m_fbTextures.at(u32(texName));
+	/* the slots cover every buffer alive at once; past them is a bug,
+	 * kept working from the heap */
+	assert(m_fbFreeCount != 0);
+	if (m_fbFreeCount == 0)
+		return new CachedTexture(texName);
+	CachedTexture * pTexture = &m_fbTextures[m_fbFree[--m_fbFreeCount]];
+	*pTexture = CachedTexture(texName);
+	return pTexture;
 }
 
 inline
@@ -303,8 +333,7 @@ void TextureCache::_loadBackground(CachedTexture *pTexture)
 
 	u32 *pDest = nullptr;
 
-	u8 *pSwapped;
-	u32 numBytes, bpl;
+	u32 bpl;
 	InternalColorFormatParam glInternalFormat;
 	DatatypeParam glType;
 
@@ -322,27 +351,15 @@ void TextureCache::_loadBackground(CachedTexture *pTexture)
 	}
 
 	bpl = gSP.bgImage.width << gSP.bgImage.size >> 1;
-	numBytes = bpl * gSP.bgImage.height;
-	const bool swappedOnHeap = numBytes > DecodeScratchBytes || m_swapScratch == nullptr;
-	pSwapped = swappedOnHeap ? (u8*)malloc(numBytes) : m_swapScratch;
-	if (pSwapped == nullptr)
-		return;
-	gli_UnswapCopyWrap(RDRAM, gSP.bgImage.address, pSwapped, 0, RDRAMSize, numBytes);
 	pDest = _takeDecode(pTexture->textureBytes, !_decodedIsRead());
-	if (pDest == nullptr) {
-		if (swappedOnHeap)
-			free(pSwapped);
+	if (pDest == nullptr)
 		return;
-	}
-	{
-		gli_tex_decode_bg(pTexture, loadParams, out32, pSwapped, bpl, pDest);
-	}
+	/* read straight out of RDRAM, only the rows shown: no unswapped copy */
+	gli_tex_decode_bg(pTexture, loadParams, out32, gSP.bgImage.address, bpl, pDest);
 
 	if ((config.generalEmulation.hacks&hack_LoadDepthTextures) != 0 && gDP.colorImage.address == gDP.depthImageAddress) {
 		_loadDepthTexture(pTexture, (u16*)pDest);
 		_dropDecode(pDest);
-		if (swappedOnHeap)
-			free(pSwapped);
 		return;
 	}
 
@@ -403,8 +420,6 @@ void TextureCache::_loadBackground(CachedTexture *pTexture)
 	}
 	if (m_curUnpackAlignment > 1)
 		gfxContext.setTextureUnpackAlignment(m_curUnpackAlignment);
-	if (swappedOnHeap)
-		free(pSwapped);
 	_dropDecode(pDest);
 }
 
