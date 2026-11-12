@@ -46,6 +46,7 @@
 #endif
 #include <sys/stat.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -363,6 +364,17 @@ static bool env_cb(unsigned cmd, void *data)
     }
 }
 
+static void pace_sleep(unsigned ms)
+{
+#if defined(_WIN32)
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000; ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
 static double now_ms(void)
 {
     return (double)cpu_features_get_time_usec() / 1e3;
@@ -384,7 +396,7 @@ static int cmp_d(const void *a, const void *b) { double x = *(const double*)a, y
 
 int main(int argc, char **argv)
 {
-    void *h; int i, nframes;
+    void *h; int i, nframes; double load_ms;
     void *ra_buf = NULL, *saved = NULL; size_t ra_size = 0, saved_size = 0;
     void (*set_env)(retro_environment_t);
     void (*set_video)(retro_video_refresh_t);
@@ -428,6 +440,10 @@ int main(int argc, char **argv)
     if (getenv("LRHOST_SYSTEM_DIR")) system_dir = getenv("LRHOST_SYSTEM_DIR");
     /* minutes of software compiling that only the pipelines lane is about */
     if (!getenv("LRHOST_KNOWN_PIPELINES")) putenv((char*)"PARALLEL_RDP_NO_KNOWN_PIPELINES=1");
+    /* Counting what the frame's threads build needs the pipelines built
+     * ahead to be there first: the core waits for them at load. A frontend
+     * never does; LRHOST_AS_FRONTEND=1 runs the core that way */
+    if (!getenv("LRHOST_AS_FRONTEND")) putenv((char*)"PARALLEL_RDP_TEST_WAIT_PIPELINES=1");
     MKDIR(system_dir);
 
     h = lib_open(argv[1]);
@@ -453,6 +469,7 @@ int main(int argc, char **argv)
     fseek(f, 0, SEEK_END); game.size = ftell(f); fseek(f, 0, SEEK_SET);
     game.data = malloc(game.size); if (fread((void*)game.data, 1, game.size, f) != game.size) return 1; fclose(f);
     game.path = argv[2]; game.meta = NULL;
+    load_ms = now_ms();
     if (!r_load(&game)) { fprintf(stderr, "retro_load_game failed\n"); return 1; }
 #ifdef LRHOST_GL
     if (gl_hw.context_type == RETRO_HW_CONTEXT_OPENGL || gl_hw.context_type == RETRO_HW_CONTEXT_OPENGL_CORE)
@@ -470,6 +487,10 @@ int main(int argc, char **argv)
         if (vk_hw.context_reset) vk_hw.context_reset();
     }
 #endif
+    /* what a frontend waits through before the first frame (the host's
+     * own GL or Vulkan set-up included) */
+    load_ms = now_ms() - load_ms;
+    printf("retro_load_game and context_reset: %.3f ms\n", load_ms);
     r_get_av(&av);
 
     /* LRHOST_STATE=file loads a savestate after the first frame, so a
@@ -536,6 +557,10 @@ int main(int argc, char **argv)
               && i % atoi(getenv("LRHOST_GL_SWITCH_EVERY")) == 0 && !gl_switch_context())
             return 1;
 #endif
+        /* LRHOST_PACE_MS=n sleeps n ms before each run, as a frontend
+         * paced by the display does: work on the core's own threads gets
+         * real time between runs */
+        if (getenv("LRHOST_PACE_MS")) pace_sleep((unsigned)atoi(getenv("LRHOST_PACE_MS")));
         run_frame = i; t0 = now_ms();
         if (getenv("LRHOST_RUNAHEAD") && i > 0)
         {
@@ -590,6 +615,7 @@ int main(int argc, char **argv)
                frames_presented, frames_duped, frame_crc);
         free(s);
     }
+    load_ms = now_ms();
 #ifdef LRHOST_GL
     gl_shutdown();
 #endif
@@ -599,6 +625,8 @@ int main(int argc, char **argv)
     vk_shutdown();
 #endif
     r_deinit();
+    /* what a frontend waits through at content close */
+    printf("context_destroy and retro_deinit: %.3f ms\n", now_ms() - load_ms);
     free(ft);
     free(saved);
     free(ra_buf);

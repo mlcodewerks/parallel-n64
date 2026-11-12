@@ -67,8 +67,10 @@ Renderer::Renderer(CommandProcessor &processor_)
 
 Renderer::~Renderer()
 {
-	/* The worker drains what is queued before it goes; built ahead, that
-	 * is skipped. */
+	/* The worker drains what is queued before it goes, building none of
+	 * it: only a compile already in the driver is waited for. What is
+	 * skipped was asked for and never used; the next session's list or
+	 * draws ask again. */
 	retro_atomic_store_release_int(&pipeline_ahead_stop, 1);
 	rdp_worker_free(pipeline_worker);
 	free(pipeline_ahead_nodes);
@@ -3743,9 +3745,9 @@ void Renderer::pipeline_work(void *user, mpsc_stack_node_t *item)
 	auto *device = renderer->device;
 	auto *node = static_cast<PipelineNode *>(item);
 
-	/* Not one built meanwhile (ahead, or by a draw); built ahead, not past
-	 * teardown. */
-	if ((!node->ahead || !retro_atomic_load_acquire_int(&renderer->pipeline_ahead_stop)) &&
+	/* Not one built meanwhile (ahead, or by a draw), and none past
+	 * teardown: content close does not wait for the queue. */
+	if (!retro_atomic_load_acquire_int(&renderer->pipeline_ahead_stop) &&
 	    node->compile.program->get_pipeline(node->compile.hash).pipeline == VK_NULL_HANDLE)
 	{
 		auto start_ts = device->write_calibrated_timestamp();
@@ -3933,13 +3935,18 @@ void Renderer::build_pipelines_ahead(const pipeline_record_t *records, size_t co
 
 bool Renderer::pipeline_ahead_urgent_built(void *ctx)
 {
-	auto *renderer = static_cast<Renderer *>(ctx);
-	return retro_atomic_load_acquire_int(&renderer->pipeline_ahead_urgent_done) >= renderer->pipeline_ahead_urgent;
+	return static_cast<Renderer *>(ctx)->pipelines_ahead_ready();
 }
 
-void Renderer::wait_pipelines_ahead()
+void Renderer::wait_pipelines_ahead_for_test()
 {
-	if (pipeline_worker && pipeline_ahead_urgent)
+	if (pipeline_worker)
 		rdp_worker_wait(pipeline_worker, pipeline_ahead_urgent_built, this);
+}
+
+bool Renderer::pipelines_ahead_ready() const
+{
+	return !pipeline_worker ||
+		retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&pipeline_ahead_urgent_done)) >= pipeline_ahead_urgent;
 }
 }

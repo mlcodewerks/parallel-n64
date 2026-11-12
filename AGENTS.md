@@ -27,6 +27,10 @@ Not there yet, most urgent first. These are debts, not precedent:
    parallel compile to stand in, so a cold first session cannot avoid it.
 3. paraLLEl-RDP needs the pipeline worker, which needs the device's pipeline cache
    control: a device without it builds on the frame's threads.
+4. paraLLEl-RDP does not wait at load for the pipelines built ahead (on a cold
+   driver cache that took minutes and looked like a hang), and a compute or VI
+   stage has nothing else that renders the same: until the worker has built
+   one, a draw that needs it builds its own. Cold cache only.
 
 ## Second rule: no allocation mid-game
 
@@ -82,8 +86,9 @@ thread, the RSP JIT and the angrylion workers (`parallel_al.c`). On it:
 Required waits are the ones a guest or an API contract demands: the
 `synchronous` RDP option at `SyncFull`, CPU reads of GPU-written RDRAM,
 savestates, teardown, `wait_sync_index`. Name the producer and the consumer of
-any wait before keeping or adding one. Only `build_pipelines_ahead` may wait
-on the pipeline worker, and only at content load.
+any wait before keeping or adding one. Nothing waits on the pipeline worker,
+at content load either: a load that did took minutes on a cold driver cache.
+The machine is never held back for it either.
 
 These also still break the rules: the pipeline compiles listed under the first
 rule, and the paraLLEl RSP JIT, which compiles blocks on first use and allocates
@@ -96,8 +101,8 @@ Know which layer you are changing. Having one does not give you the next.
 | Layer | Where | Scope |
 | --- | --- | --- |
 | Prebuilt SPIR-V | `shaders/slangmosh.hpp`, `upscaler_shaders.hpp` | every device |
-| Recipes (what to build) | `parallel_rdp_pipelines.bin`, `pipeline_record.h` | portable |
-| Driver blob | `parallel_rdp_pipeline_cache.bin` | one device and driver |
+| Recipes (what to build) | `<system>/ParallelN64/parallel_rdp_pipelines.bin`, `pipeline_record.h` | portable |
+| Driver blob | `<system>/ParallelN64/parallel_rdp_pipeline_cache.bin` | one device and driver |
 | Live `VkPipeline` | `Program::get_pipeline` | this device |
 | GL binaries / keys | `glsl_ShaderStorage.cpp` | GL vendor and version / portable |
 
@@ -117,8 +122,17 @@ Know which layer you are changing. Having one does not give you the next.
   through the state setter its draw uses, so a cold run builds it at load too.
   `tools/ci/parallel_rdp_pipelines.py` holds a first run to none on the frame's
   threads. The other lanes skip this: it takes a software driver most of a minute.
-- `wait_pipelines_ahead` is for load time. Specialised rasterizer variants are
+- Content close starts no compile: the worker drops what is still queued,
+  ahead or asked for by a draw, and only the compile already in the driver is
+  waited for. The frontend lane counts the pipelines begun after
+  `context_destroy`: none.
+- Nothing waits for the pipelines built ahead, at load or later, and the
+  machine is never held back for them: a draw that gets to one before the
+  worker builds its own. Only the test hosts wait, at load
+  (`PARALLEL_RDP_TEST_WAIT_PIPELINES`). Specialised rasterizer variants are
   never urgent: the generic variant covers them.
+  `tools/ci/parallel_rdp_pipelines.py` (as a frontend) runs without that wait:
+  load must return at once and every frame must be presented.
 - Each bit in the specialization constants multiplies the variants. Fewer
   permutations beat compiling them faster. Prefer state read from buffers
   unless a specialisation is a measured win.
@@ -297,6 +311,29 @@ the device. Size barriers and flushes to the bytes concerned.
 - Savestate load, reset and Run-Ahead must invalidate derived state.
 - Timing and motion code goes by real time and gets smoother with refresh
   rate; nothing is tuned to 60 Hz.
+
+## Quantization
+
+Precision is lost only where the N64 lost it. Look out, in anything touched,
+for precision thrown away on the host side for no reason of accuracy: in
+audio, video, texture formats, colour and depth conversion, anywhere a value
+changes width or type.
+
+- A value is kept at the width the hardware gave it until the hardware itself
+  narrows it. 5-bit channels widen to 8 by replicating bits, not by shifting
+  (`x << 3` leaves white at 248).
+- No narrower host format than the source: no RGBA4444 or RGB565 upload of
+  texels that had more, no 16-bit target or depth where the guest's needs more,
+  no 8-bit intermediate between two wider stages.
+- No conversion there and back (float to integer to float, sRGB twice, a
+  resample undone later), and no rounding in the middle of a chain: round
+  once, at the end, the way the hardware does.
+- Audio stays at the guest's sample rate and width until the frontend; nothing
+  truncates where it should round or clips before the last mix.
+- Dithering and the VI's filters are emulation: keep them bit-exact. Anything
+  else that dithers, truncates or clamps needs a reason, in a comment.
+- A fix says what was lost and shows it: the values before and after, and a
+  test that fails on the narrower path.
 
 ## Measuring
 

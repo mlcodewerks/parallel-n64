@@ -74,6 +74,10 @@ static struct retro_hw_upscaler_inputs upscaler_inputs;
 /* Per sync index: motion vectors, depth, then the translucency mask */
 static Util::HeldHandle<Vulkan::Image> upscaler_handles[3 * RDP_MAX_SYNC_FRAMES];
 static bool upscaler_on;
+/* test hosts that count what the frame's threads build have load wait for
+ * the worker (PARALLEL_RDP_TEST_WAIT_PIPELINES, read at init); nothing
+ * else does */
+static bool test_wait_pipelines;
 
 /* The frames released past n, as a shrinking vector did. */
 static void set_num_sync_frames(unsigned n)
@@ -324,15 +328,37 @@ void begin_frame()
  * into, and to leave the files alone when nothing changed. */
 static pipeline_record_t *pipeline_list;
 static size_t pipeline_list_count;
+
+/* The pipelines the list and the renderer's options name are built on the
+ * worker, and nothing waits for them: a draw that gets to one first builds
+ * its own, as on a first run it always did. */
+static void build_pipelines_ahead()
+{
+	frontend->build_pipelines_ahead(pipeline_list, pipeline_list_count, upscaler_iface != nullptr);
+	if (test_wait_pipelines)
+		frontend->wait_pipelines_ahead_for_test();
+}
 static uint32_t pipeline_cache_loaded_crc;
 static int64_t pipeline_cache_loaded_size;
 
+/* <system>/ParallelN64/<name>, the folder GLideN64 keeps its files in,
+ * made if it is not there. A file an earlier build left in <system> itself
+ * is moved over first, so that what it holds is not built again. Content
+ * load and close only. */
 static bool pipeline_file_path(char *s, size_t len, const char *name)
 {
+	char folder[PATH_MAX_LENGTH];
+	char old[PATH_MAX_LENGTH];
 	const char *dir = NULL;
 	if (!environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) || !dir || !*dir)
 		return false;
-	fill_pathname_join_special(s, dir, name, len);
+	fill_pathname_join_special(folder, dir, "ParallelN64", sizeof(folder));
+	if (!path_mkdir(folder))
+		return false;
+	fill_pathname_join_special(s, folder, name, len);
+	fill_pathname_join_special(old, dir, name, sizeof(old));
+	if (!filestream_exists(s) && filestream_exists(old))
+		filestream_rename(old, s);
 	return true;
 }
 
@@ -590,7 +616,7 @@ static void upscaler_poll()
 			device_supported = false;
 		/* (only what this factor adds is new) */
 		if (device_supported)
-			frontend->build_pipelines_ahead(pipeline_list, pipeline_list_count, upscaler_iface != nullptr);
+			build_pipelines_ahead();
 		upscaler_reset_pending = true;
 	}
 	if (upscaler_iface)
@@ -656,6 +682,7 @@ static void upscaler_image(struct retro_hw_upscaler_image &out, const Vulkan::Im
 
 bool init()
 {
+	test_wait_pipelines = getenv("PARALLEL_RDP_TEST_WAIT_PIPELINES") != nullptr;
 	if (!context || !vulkan)
 		return false;
 
@@ -701,7 +728,7 @@ bool init()
 	upscaler_reset_pending = true;
 	if (!create_processor(upscaling))
 		return false;
-	frontend->build_pipelines_ahead(pipeline_list, pipeline_list_count, upscaler_iface != nullptr);
+	build_pipelines_ahead();
 
 	timeline_value = 0;
 	pending_timeline_value = 0;

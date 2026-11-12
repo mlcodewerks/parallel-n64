@@ -143,10 +143,13 @@ public:
 	// device. Must not be called from inside the command thread.
 	void run_on_command_thread(void (*fn)(void *), void *ctx);
 
-	// Builds the pipelines @records lists on the pipeline worker, ahead of
-	// their first use, and returns once those a draw cannot do without are
-	// built. The thread that queues commands, before the first one.
+	// Queues the pipelines @records lists to the pipeline worker, ahead of
+	// their first use, and returns without waiting for any. The thread that
+	// queues commands, before the first one.
 	void build_pipelines_ahead(const pipeline_record_t *records, size_t count, bool with_upscaler);
+	// Sleeps until the worker has built them. Test hosts only: a frontend
+	// never waits, and a draw that gets to one first builds its own.
+	void wait_pipelines_ahead_for_test();
 
 	// Queues up state and drawing commands.
 	void enqueue_command(unsigned num_words, const uint32_t *words);
