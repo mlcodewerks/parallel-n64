@@ -22,6 +22,11 @@
 
 #pragma once
 
+#include <string.h>
+#include "shader.h"
+#include "pipeline_map.h"
+#include "program_cache.h"
+#include "resource_bindings.h"
 #include "cookie.hpp"
 #include "descriptor_set.hpp"
 #include "hash.hpp"
@@ -30,193 +35,122 @@
 #include "vulkan_headers.hpp"
 #include "enum_cast.hpp"
 
-namespace spirv_cross
-{
-struct SPIRType;
-}
-
+// The layouts are C (shader.h). These give the rest of Granite the names
+// it had.
 namespace Vulkan
 {
 class Device;
 
+static_assert(VULKAN_NUM_DESCRIPTOR_SETS == GRANITE_NUM_DESCRIPTOR_SETS, "The C layouts have other sets.");
+
 enum class ShaderStage
 {
-	Vertex = 0,
-	TessControl = 1,
-	TessEvaluation = 2,
-	Geometry = 3,
-	Fragment = 4,
-	Compute = 5,
-	Count
+	Vertex = GRANITE_SHADER_STAGE_VERTEX,
+	TessControl = GRANITE_SHADER_STAGE_TESS_CONTROL,
+	TessEvaluation = GRANITE_SHADER_STAGE_TESS_EVALUATION,
+	Geometry = GRANITE_SHADER_STAGE_GEOMETRY,
+	Fragment = GRANITE_SHADER_STAGE_FRAGMENT,
+	Compute = GRANITE_SHADER_STAGE_COMPUTE,
+	Count = GRANITE_SHADER_STAGE_COUNT
 };
 
-struct ResourceLayout
+struct ResourceLayout : granite_resource_layout_t
 {
-	DescriptorSetLayout sets[VULKAN_NUM_DESCRIPTOR_SETS];
-	uint32_t input_mask = 0;
-	uint32_t output_mask = 0;
-	uint32_t push_constant_size = 0;
-	uint32_t spec_constant_mask = 0;
-	// Carried in the reflection the shader bank stores; never set.
-	uint32_t bindless_set_mask = 0;
-	enum { Version = 3 };
+	ResourceLayout()
+	{
+		memset(static_cast<granite_resource_layout_t *>(this), 0, sizeof(granite_resource_layout_t));
+	}
 
-	bool unserialize(const uint8_t *data, size_t size);
+	bool unserialize(const uint8_t *data, size_t size)
+	{
+		return granite_resource_layout_unserialize(this, data, size);
+	}
 };
-static_assert(sizeof(DescriptorSetLayout) % 8 == 0, "Size of DescriptorSetLayout does not align to 64 bits.");
 
-struct CombinedResourceLayout
+struct CombinedResourceLayout : granite_combined_layout_t
 {
-	uint32_t attribute_mask = 0;
-	uint32_t render_target_mask = 0;
-	DescriptorSetLayout sets[VULKAN_NUM_DESCRIPTOR_SETS] = {};
-	uint32_t stages_for_bindings[VULKAN_NUM_DESCRIPTOR_SETS][VULKAN_NUM_BINDINGS] = {};
-	uint32_t stages_for_sets[VULKAN_NUM_DESCRIPTOR_SETS] = {};
-	VkPushConstantRange push_constant_range = {};
-	uint32_t descriptor_set_mask = 0;
-	uint32_t spec_constant_mask[Util::ecast(ShaderStage::Count)] = {};
-	uint32_t combined_spec_constant_mask = 0;
-	Util::Hash push_constant_layout_hash = 0;
+	CombinedResourceLayout()
+	{
+		granite_combined_layout_init(this);
+	}
 };
 
-struct ResourceBinding
-{
-	union {
-		VkDescriptorBufferInfo buffer;
-		struct
-		{
-			VkDescriptorImageInfo fp;
-			VkDescriptorImageInfo integer;
-		} image;
-		VkBufferView buffer_view;
-	};
-	VkDeviceSize dynamic_offset;
-};
+static_assert(VULKAN_PUSH_CONSTANT_SIZE == GRANITE_PUSH_CONSTANT_SIZE, "The C bindings have other push constants.");
+using ResourceBindings = granite_resource_bindings_t;
 
-struct ResourceBindings
-{
-	ResourceBinding bindings[VULKAN_NUM_DESCRIPTOR_SETS][VULKAN_NUM_BINDINGS];
-	uint64_t cookies[VULKAN_NUM_DESCRIPTOR_SETS][VULKAN_NUM_BINDINGS];
-	uint64_t secondary_cookies[VULKAN_NUM_DESCRIPTOR_SETS][VULKAN_NUM_BINDINGS];
-	uint8_t push_constant_data[VULKAN_PUSH_CONSTANT_SIZE];
-};
-
-struct ImmutableSamplerBank
-{
-	const ImmutableSampler *samplers[VULKAN_NUM_DESCRIPTOR_SETS][VULKAN_NUM_BINDINGS];
-	static void hash(Util::Hasher &h, const ImmutableSamplerBank *bank);
-};
-
-class PipelineLayout : public HashedObject<PipelineLayout>
+// Shaders, programs and pipeline layouts are C (program_cache.h). No
+// members of their own: the C structs by other names.
+class PipelineLayout : public granite_cached_pipeline_layout_t
 {
 public:
-	PipelineLayout(Util::Hash hash, Device *device, const CombinedResourceLayout &layout,
-	               const ImmutableSamplerBank *sampler_bank);
-	~PipelineLayout();
+	PipelineLayout() = delete;
 
-	const CombinedResourceLayout &get_resource_layout() const
+	const granite_combined_layout_t &get_resource_layout() const
 	{
 		return layout;
 	}
 
 	VkPipelineLayout get_layout() const
 	{
-		return pipe_layout;
+		return impl.layout;
 	}
 
-	DescriptorSetAllocator *get_allocator(unsigned set) const
+	// What descriptor sets are bound against (resource_bindings.h).
+	const granite_bind_layout_t &get_bind_layout() const
 	{
-		return set_allocators[set];
+		return bind;
 	}
-
-	VkDescriptorUpdateTemplate get_update_template(unsigned set) const
-	{
-		return update_template[set];
-	}
-
-	uint32_t get_push_set_mask() const
-	{
-		return push_set_mask;
-	}
-
-private:
-	Device *device;
-	VkPipelineLayout pipe_layout = VK_NULL_HANDLE;
-	CombinedResourceLayout layout;
-	DescriptorSetAllocator *set_allocators[VULKAN_NUM_DESCRIPTOR_SETS] = {};
-	VkDescriptorUpdateTemplate update_template[VULKAN_NUM_DESCRIPTOR_SETS] = {};
-	uint32_t push_set_mask = 0;
-	void create_update_templates();
 };
 
-class Shader : public HashedObject<Shader>
+class Shader : public granite_shader_t
 {
 public:
-	Shader(Util::Hash binding, Device *device, const uint32_t *data, size_t size,
-	       const ResourceLayout *layout = nullptr,
-	       const ImmutableSamplerBank *sampler_bank = nullptr);
-	~Shader();
-
-	const ResourceLayout &get_layout() const
-	{
-		return layout;
-	}
-
-	const ImmutableSamplerBank &get_immutable_sampler_bank() const
-	{
-		return immutable_sampler_bank;
-	}
+	Shader() = delete;
 
 	VkShaderModule get_module() const
 	{
 		return module;
 	}
-	static Util::Hash hash(const uint32_t *data, size_t size, const ImmutableSamplerBank *sampler_bank);
 
-private:
-	Device *device;
-	VkShaderModule module = VK_NULL_HANDLE;
-	ResourceLayout layout;
-	ImmutableSamplerBank immutable_sampler_bank;
+	Util::Hash get_hash() const
+	{
+		return node.hash;
+	}
 };
 
-struct Pipeline
-{
-	VkPipeline pipeline;
-	uint32_t dynamic_mask;
-};
+using Pipeline = granite_pipeline_t;
 
-class Program : public HashedObject<Program>, public InternalSyncEnabled
+class Program : public granite_program_t
 {
 public:
-	Program(Device *device, Shader *vertex, Shader *fragment);
-	Program(Device *device, Shader *compute);
-	~Program();
+	Program() = delete;
+
+	Util::Hash get_hash() const
+	{
+		return node.hash;
+	}
 
 	inline const Shader *get_shader(ShaderStage stage) const
 	{
-		return shaders[Util::ecast(stage)];
-	}
-
-	void set_pipeline_layout(PipelineLayout *new_layout)
-	{
-		layout = new_layout;
+		return static_cast<const Shader *>(shaders[Util::ecast(stage)]);
 	}
 
 	PipelineLayout *get_pipeline_layout() const
 	{
-		return layout;
+		return static_cast<PipelineLayout *>(layout);
 	}
 
-	Pipeline get_pipeline(Util::Hash hash) const;
-	Pipeline add_pipeline(Util::Hash hash, const Pipeline &pipeline);
+	Pipeline get_pipeline(Util::Hash hash) const
+	{
+		return granite_pipeline_map_find(&pipelines, hash);
+	}
 
-private:
-	void set_shader(ShaderStage stage, Shader *handle);
-	Device *device;
-	Shader *shaders[Util::ecast(ShaderStage::Count)] = {};
-	PipelineLayout *layout = nullptr;
-	VulkanCache<Util::IntrusivePODWrapper<Pipeline>> pipelines;
-	void destroy_pipeline(const Pipeline &pipeline);
+	// The program's pipeline for the hash: this one, or the one another
+	// thread added first, or none when out of memory. Unless it is this
+	// one, this one is the caller's to destroy.
+	Pipeline add_pipeline(Util::Hash hash, const Pipeline &pipeline)
+	{
+		return granite_pipeline_map_add(&pipelines, hash, &pipeline);
+	}
 };
 }

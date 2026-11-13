@@ -75,12 +75,6 @@ struct ScanoutOptions
 		bool gamma_dither = true;
 	} vi;
 
-	// External memory support.
-	// If true, the scanout image will be created with external memory support.
-	// presist_frame_on_invalid_input must be false when using exports.
-	VkExternalMemoryHandleTypeFlagBits export_handle_type = {};
-	bool export_scanout = false;
-
 	/* For a temporal upscaler: the scanout is the framebuffer as drawn, at
 	 * the upscaling factor, without the VI's filters, scaling or crop; the
 	 * frame's motion vectors, depth and jitter come with it
@@ -187,19 +181,6 @@ private:
 
 	void init_gamma_table();
 	bool previous_frame_blank = false;
-	bool debug_channel = false;
-	int filter_debug_channel_x = -1;
-	int filter_debug_channel_y = -1;
-
-	void message(const char *tag, uint32_t code,
-	             uint32_t x, uint32_t y, uint32_t z,
-	             uint32_t num_words, const Vulkan::DebugChannelInterface::Word *words);
-	static void debug_channel_message(void *user, const char *tag, uint32_t code,
-	                                  uint32_t x, uint32_t y, uint32_t z,
-	                                  uint32_t num_words, const Vulkan::DebugChannelInterface::Word *words)
-	{
-		static_cast<VideoInterface *>(user)->message(tag, code, x, y, z, num_words, words);
-	}
 
 	// Intermediate images, reused instead of created every frame.
 	mutable VIImagePool image_pool;
@@ -225,13 +206,11 @@ private:
 	uint32_t last_valid_frame_count = 0;
 	Vulkan::ImageHandle prev_scanout_image;
 	VkImageLayout prev_image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-	bool prev_image_is_external = false;
 	Vulkan::ImageHandle prev_upscaler_image;
 	rdp_upscaler_framebuffer_t prev_upscaler_fb = {};
 
 	size_t rdram_offset = 0;
 	size_t rdram_size = 0;
-	bool timestamp = false;
 
 	struct HorizontalInfo
 	{
@@ -328,8 +307,5 @@ private:
 	                                        unsigned scaling_factor, bool field_select,
 	                                        const ScanoutOptions &options) const;
 	static bool need_fetch_bug_emulation(const Registers &reg, unsigned scaling_factor);
-
-	// last: it is read only with a debug channel on
-	Vulkan::DebugChannelInterface debug_channel_iface = { debug_channel_message, this };
 };
 }

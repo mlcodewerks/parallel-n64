@@ -23,6 +23,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <retro_atomic.h>
 #include "util_lite.hpp"
 
 namespace Util
@@ -54,26 +55,28 @@ class MultiThreadCounter
 public:
 	MultiThreadCounter()
 	{
-		count.init(1);
+		retro_atomic_int_init(&count, 1);
 	}
 
 	inline void add_ref()
 	{
-		count.add();
+		retro_atomic_fetch_add_int(&count, 1);
 	}
 
+	/* True for the last one */
 	inline bool release()
 	{
-		return count.sub_is_last();
+		return retro_atomic_fetch_sub_int(&count, 1) == 1;
 	}
 
+	/* acquire: what the last other owner did happens before */
 	inline bool is_one() const
 	{
-		return count.is_one();
+		return retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&count)) == 1;
 	}
 
 private:
-	AtomicCount count;
+	retro_atomic_int_t count;
 };
 
 template <typename T>
@@ -179,15 +182,10 @@ public:
 
 	void reset()
 	{
-		using ReferenceBase = IntrusivePtrEnabled<
-				typename T::EnabledBase,
-				typename T::EnabledDeleter,
-				typename T::EnabledReferenceOp>;
-
-		// Static up-cast here to avoid potential issues with multiple intrusive inheritance.
-		// Also makes sure that the pointer type actually inherits from this type.
+		// The object counts its own references: an IntrusivePtrEnabled, or
+		// a C object behind add_reference() and release_reference().
 		if (data)
-			static_cast<ReferenceBase *>(data)->release_reference();
+			data->release_reference();
 		data = nullptr;
 	}
 
@@ -197,34 +195,22 @@ public:
 		static_assert(UTIL_IS_BASE_OF(T, U),
 		              "Cannot safely assign downcasted intrusive pointers.");
 
-		using ReferenceBase = IntrusivePtrEnabled<
-				typename T::EnabledBase,
-				typename T::EnabledDeleter,
-				typename T::EnabledReferenceOp>;
-
 		reset();
 		data = static_cast<T *>(other.data);
 
-		// Static up-cast here to avoid potential issues with multiple intrusive inheritance.
-		// Also makes sure that the pointer type actually inherits from this type.
 		if (data)
-			static_cast<ReferenceBase *>(data)->add_reference();
+			data->add_reference();
 		return *this;
 	}
 
 	IntrusivePtr &operator=(const IntrusivePtr &other)
 	{
-		using ReferenceBase = IntrusivePtrEnabled<
-				typename T::EnabledBase,
-				typename T::EnabledDeleter,
-				typename T::EnabledReferenceOp>;
-
 		if (this != &other)
 		{
 			reset();
 			data = other.data;
 			if (data)
-				static_cast<ReferenceBase *>(data)->add_reference();
+				data->add_reference();
 		}
 		return *this;
 	}

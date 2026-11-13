@@ -33,9 +33,6 @@
 #include "upscaler_pass.hpp"
 #include "temporal_upscaler.h"
 
-#ifndef GRANITE_VULKAN_MT
-#error "Granite Vulkan backend must be built with multithreading support."
-#endif
 
 namespace RDP
 {
@@ -314,7 +311,6 @@ private:
 	void perform_coherency(CoherencyOperation &work);
 
 	uint8_t *host_rdram = nullptr;
-	bool measure_stall_time = false;
 	bool single_threaded_processing = false;
 	bool is_supported = false;
 	bool super_sampled_readback = false;
@@ -322,7 +318,6 @@ private:
 	bool no_storage_8bit = false;
 	void flush_hidden_dram_to_dump();
 	bool is_host_coherent = true;
-	bool timestamp = false;
 
 	friend class Renderer;
 

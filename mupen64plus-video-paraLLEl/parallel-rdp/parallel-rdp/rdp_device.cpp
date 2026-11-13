@@ -122,7 +122,7 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 			size_t align = device.get_device_features().host_memory_properties.minImportedHostPointerAlignment;
 			import_size = (import_size + align - 1) & ~(align - 1);
 			info.size = import_size;
-			rdram = device.create_imported_host_buffer(info, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, rdram_ptr);
+			rdram = device.create_imported_host_buffer(info, rdram_ptr);
 			if (!rdram)
 				LOGE("Failed to allocate RDRAM with VK_EXT_external_memory_host.\n");
 		}
@@ -181,13 +181,6 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 	clear_tmem();
 	init_renderer();
 
-	if (const char *env = getenv("PARALLEL_RDP_BENCH"))
-	{
-		measure_stall_time = strtol(env, nullptr, 0) > 0;
-		if (measure_stall_time)
-			LOGI("Will measure stall timings.\n");
-	}
-
 	if (const char *env = getenv("PARALLEL_RDP_SINGLE_THREADED_COMMAND"))
 	{
 		single_threaded_processing = strtol(env, nullptr, 0) > 0;
@@ -201,9 +194,6 @@ CommandProcessor::CommandProcessor(Vulkan::Device &device_, void *rdram_ptr,
 		if (!ring)
 			single_threaded_processing = true;
 	}
-
-	if (const char *env = getenv("PARALLEL_RDP_BENCH"))
-		timestamp = strtol(env, nullptr, 0) > 0;
 }
 
 // Here, where ShaderBank is complete.
@@ -350,7 +340,7 @@ void CommandProcessor::clear_tmem()
 
 void CommandProcessor::clear_buffer(Vulkan::Buffer &buffer, uint32_t value)
 {
-	if (!buffer.get_allocation().is_host_allocation())
+	if (!buffer.get_allocation().host_base)
 	{
 		auto cmd = device.request_command_buffer();
 		cmd->fill_buffer(buffer, value);
@@ -1245,21 +1235,12 @@ uint64_t CommandProcessor::signal_timeline()
 
 void CommandProcessor::wait_for_timeline(uint64_t index)
 {
-	Vulkan::QueryPoolHandle start_ts, end_ts;
-	if (measure_stall_time)
-		start_ts = device.write_calibrated_timestamp();
 	TimelineWait ctx = { this, size_t(index) };
 	rdp_worker_wait(timeline_worker.worker, timeline_reached, &ctx);
-	if (measure_stall_time)
-	{
-		end_ts = device.write_calibrated_timestamp();
-		device.register_time_interval("RDP CPU", rdp_move(start_ts), rdp_move(end_ts), "wait-for-timeline");
-	}
 }
 
 Vulkan::ImageHandle CommandProcessor::scanout(const ScanoutOptions &opts, VkImageLayout target_layout)
 {
-	Vulkan::QueryPoolHandle start_ts, end_ts;
 	drain_command_ring();
 
 	if (dump_writer)
@@ -1471,16 +1452,8 @@ Vulkan::ImageHandle CommandProcessor::scanout(const ScanoutOptions &opts)
 
 void CommandProcessor::drain_command_ring()
 {
-	Vulkan::QueryPoolHandle start_ts, end_ts;
-	if (timestamp)
-		start_ts = device.write_calibrated_timestamp();
 	if (ring)
 		rdp_command_ring_drain(ring);
-	if (timestamp)
-	{
-		end_ts = device.write_calibrated_timestamp();
-		device.register_time_interval("RDP CPU", rdp_move(start_ts), rdp_move(end_ts), "drain-command-ring");
-	}
 }
 
 void CommandProcessor::timeline_work(void *user, mpsc_stack_node_t *item)

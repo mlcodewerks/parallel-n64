@@ -228,16 +228,6 @@ void VideoInterface::set_device(Vulkan::Device *device_)
 {
 	device = device_;
 	init_gamma_table();
-
-	if (const char *env = getenv("VI_DEBUG"))
-		debug_channel = strtol(env, nullptr, 0) != 0;
-	if (const char *env = getenv("VI_DEBUG_X"))
-		filter_debug_channel_x = strtol(env, nullptr, 0);
-	if (const char *env = getenv("VI_DEBUG_Y"))
-		filter_debug_channel_y = strtol(env, nullptr, 0);
-
-	if (const char *timestamp_env = getenv("PARALLEL_RDP_BENCH"))
-		timestamp = strtol(timestamp_env, nullptr, 0) > 0;
 }
 
 void VideoInterface::set_renderer(Renderer *renderer_)
@@ -247,43 +237,7 @@ void VideoInterface::set_renderer(Renderer *renderer_)
 
 int VideoInterface::resolve_shader_define(const char *name, const char *define) const
 {
-	if (strcmp(define, "DEBUG_ENABLE") == 0)
-		return int(debug_channel);
-	else
-		return 0;
-}
-
-void VideoInterface::message(const char *tag, uint32_t code, uint32_t x, uint32_t y, uint32_t, uint32_t num_words,
-                             const Vulkan::DebugChannelInterface::Word *words)
-{
-	if (filter_debug_channel_x >= 0 && x != uint32_t(filter_debug_channel_x))
-		return;
-	if (filter_debug_channel_y >= 0 && y != uint32_t(filter_debug_channel_y))
-		return;
-
-	switch (num_words)
-	{
-	case 1:
-		LOGI("(%u, %u), line %d.\n", x, y, words[0].s32);
-		break;
-
-	case 2:
-		LOGI("(%u, %u), line %d: (%d).\n", x, y, words[0].s32, words[1].s32);
-		break;
-
-	case 3:
-		LOGI("(%u, %u), line %d: (%d, %d).\n", x, y, words[0].s32, words[1].s32, words[2].s32);
-		break;
-
-	case 4:
-		LOGI("(%u, %u), line %d: (%d, %d, %d).\n", x, y,
-		     words[0].s32, words[1].s32, words[2].s32, words[3].s32);
-		break;
-
-	default:
-		LOGE("Unknown number of generic parameters: %u\n", num_words);
-		break;
-	}
+	return 0;
 }
 
 void VideoInterface::init_gamma_table()
@@ -343,7 +297,7 @@ void VideoInterface::set_shader_bank(const ShaderBank *bank)
 	                                       sizeof(UpscalerShaders::vi_scale_fold_frag), &layout);
 
 	static const uint32_t black = 0;
-	Vulkan::ImageInitialData initial = { &black, 1, 1 };
+	Vulkan::ImageInitialData initial = { &black, 1 };
 	no_previous_frame = device->create_image(
 			Vulkan::ImageCreateInfo::immutable_2d_image(1, 1, VK_FORMAT_R8G8B8A8_UNORM), &initial);
 
@@ -673,7 +627,6 @@ Vulkan::ImageHandle VideoInterface::vram_fetch_stage(const Registers &regs, unsi
 {
 	auto async_cmd = device->request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
 	Vulkan::ImageHandle vram_image;
-	Vulkan::QueryPoolHandle start_ts, end_ts;
 	bool divot = (regs.status & VI_CONTROL_DIVOT_ENABLE_BIT) != 0;
 
 	if (scaling_factor > 1)
@@ -685,9 +638,6 @@ Vulkan::ImageHandle VideoInterface::vram_fetch_stage(const Registers &regs, unsi
 		async_cmd->barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
 		                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 	}
-
-	if (timestamp)
-		start_ts = async_cmd->write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	// Need to sample a 2-pixel border to have room for AA filter and divot.
 	int extract_width = regs.max_x + 2 + 4 + int(divot) * 2;
@@ -755,12 +705,6 @@ Vulkan::ImageHandle VideoInterface::vram_fetch_stage(const Registers &regs, unsi
 	async_cmd->barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
 	                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0);
 
-	if (timestamp)
-	{
-		end_ts = async_cmd->write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-		device->register_time_interval("VI GPU", rdp_move(start_ts), rdp_move(end_ts), "extract-vram");
-	}
-
 	Vulkan::Semaphore sem;
 	device->submit(async_cmd, nullptr, 1, &sem);
 	device->add_wait_semaphore(Vulkan::CommandBuffer::Type::Generic, rdp_move(sem),
@@ -773,7 +717,6 @@ Vulkan::ImageHandle VideoInterface::aa_fetch_stage(Vulkan::CommandBuffer &cmd, V
                                                    const Registers &regs, unsigned scaling_factor) const
 {
 	Vulkan::ImageHandle aa_image;
-	Vulkan::QueryPoolHandle start_ts, end_ts;
 	bool fetch_bug = need_fetch_bug_emulation(regs, scaling_factor);
 	bool divot = (regs.status & VI_CONTROL_DIVOT_ENABLE_BIT) != 0;
 
@@ -812,9 +755,6 @@ Vulkan::ImageHandle VideoInterface::aa_fetch_stage(Vulkan::CommandBuffer &cmd, V
 	                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
 	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 
-	if (timestamp)
-		start_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-
 	cmd.begin_render_pass(rp);
 	set_fetch_pipeline(cmd, regs.status, fetch_bug);
 
@@ -833,12 +773,6 @@ Vulkan::ImageHandle VideoInterface::aa_fetch_stage(Vulkan::CommandBuffer &cmd, V
 	cmd.draw(3);
 	cmd.end_render_pass();
 
-	if (timestamp)
-	{
-		end_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		device->register_time_interval("VI GPU", rdp_move(start_ts), rdp_move(end_ts), "vi-fetch");
-	}
-
 	cmd.image_barrier(*aa_image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 	                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -850,7 +784,6 @@ Vulkan::ImageHandle VideoInterface::divot_stage(Vulkan::CommandBuffer &cmd, Vulk
                                                 const Registers &regs, unsigned scaling_factor) const
 {
 	Vulkan::ImageHandle divot_image;
-	Vulkan::QueryPoolHandle start_ts, end_ts;
 	bool fetch_bug = need_fetch_bug_emulation(regs, scaling_factor);
 
 	// For the divot pass, we need to figure out how many pixels we might need to read.
@@ -888,21 +821,12 @@ Vulkan::ImageHandle VideoInterface::divot_stage(Vulkan::CommandBuffer &cmd, Vulk
 	                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0,
 	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 
-	if (timestamp)
-		start_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-
 	cmd.begin_render_pass(rp);
 	set_divot_pipeline(cmd, fetch_bug);
 
 	cmd.set_texture(0, 0, aa_image.get_view());
 	cmd.draw(3);
 	cmd.end_render_pass();
-
-	if (timestamp)
-	{
-		end_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		device->register_time_interval("VI GPU", rdp_move(start_ts), rdp_move(end_ts), "vi-divot");
-	}
 
 	cmd.image_barrier(*divot_image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -967,7 +891,6 @@ Vulkan::ImageHandle VideoInterface::scale_stage(Vulkan::CommandBuffer &cmd, cons
                                                 const ScaleFold *fold) const
 {
 	Vulkan::ImageHandle scale_image;
-	Vulkan::QueryPoolHandle start_ts, end_ts;
 	bool fetch_bug = need_fetch_bug_emulation(regs, scaling_factor);
 	bool serrate = (regs.status & VI_CONTROL_SERRATE_BIT) != 0 && !options.upscale_deinterlacing;
 
@@ -1052,12 +975,6 @@ Vulkan::ImageHandle VideoInterface::scale_stage(Vulkan::CommandBuffer &cmd, cons
 	rt_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	rt_info.misc = Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 
-	if (options.export_scanout && final_pass)
-	{
-		rt_info.misc |= Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
-		rt_info.external.memory_handle_type = options.export_handle_type;
-	}
-
 	scale_image = acquire_image(rt_info, false).image;
 
 	if (!scale_image)
@@ -1079,12 +996,7 @@ Vulkan::ImageHandle VideoInterface::scale_stage(Vulkan::CommandBuffer &cmd, cons
 
 	if (prev_scanout_image)
 	{
-		if (prev_image_is_external)
-		{
-			cmd.acquire_external_image_barrier(*prev_scanout_image, prev_image_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-											   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-		}
-		else if (prev_image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+		if (prev_image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 		{
 			VK_ASSERT(prev_image_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 			cmd.image_barrier(*prev_scanout_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1092,9 +1004,6 @@ Vulkan::ImageHandle VideoInterface::scale_stage(Vulkan::CommandBuffer &cmd, cons
 			                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 		}
 	}
-
-	if (timestamp)
-		start_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
 	cmd.begin_render_pass(rp);
 
@@ -1273,12 +1182,6 @@ Vulkan::ImageHandle VideoInterface::scale_stage(Vulkan::CommandBuffer &cmd, cons
 
 	cmd.end_render_pass();
 
-	if (timestamp)
-	{
-		end_ts = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-		device->register_time_interval("VI GPU", rdp_move(start_ts), rdp_move(end_ts), "vi-scale");
-	}
-
 	return scale_image;
 }
 
@@ -1318,12 +1221,6 @@ Vulkan::ImageHandle VideoInterface::downscale_stage(Vulkan::CommandBuffer &cmd, 
 		downscale_steps--;
 		need_pass = scaling_factor > 1 && downscale_steps;
 
-		if (options.export_scanout && final_pass && !need_pass)
-		{
-			rt_info.misc |= Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
-			rt_info.external.memory_handle_type = options.export_handle_type;
-		}
-
 		downscale_image = acquire_image(rt_info, false).image;
 
 		if (!downscale_image)
@@ -1362,12 +1259,6 @@ Vulkan::ImageHandle VideoInterface::upscale_deinterlace(Vulkan::CommandBuffer &c
 	rt_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	rt_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	rt_info.misc = Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
-
-	if (options.export_scanout)
-	{
-		rt_info.misc |= Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
-		rt_info.external.memory_handle_type = options.export_handle_type;
-	}
 
 	deinterlaced_image = acquire_image(rt_info, false).image;
 
@@ -1652,9 +1543,6 @@ Vulkan::ImageHandle VideoInterface::scanout(VkImageLayout target_layout, const S
 
 	auto cmd = device->request_command_buffer();
 
-	if (debug_channel)
-		cmd->begin_debug_channel(&debug_channel_iface, "VI", 32 * 1024 * 1024);
-
 	// In the first pass, we need to read from VRAM and apply the fetch filter.
 	// This is either the AA filter if coverage < 7, or the dither reconstruction filter if coverage == 7 and enabled.
 	// Following that, post-AA filter, we have the divot filter.
@@ -1742,34 +1630,13 @@ Vulkan::ImageHandle VideoInterface::scanout(VkImageLayout target_layout, const S
 
 	if (scale_image)
 	{
-		if (options.export_scanout)
-		{
-			// Foreign handle types (e.g. D3D) must use GENERAL layouts.
-			if (options.export_handle_type != Vulkan::ExternalHandle::get_opaque_memory_handle_type())
-				target_layout = VK_IMAGE_LAYOUT_GENERAL;
-
-			cmd->release_external_image_barrier(*scale_image, src_layout,
-			                                    target_layout,
-			                                    layout_to_stage(src_layout),
-			                                    layout_to_access(src_layout));
-		}
-		else
-		{
-			cmd->image_barrier(*scale_image, src_layout, target_layout,
-			                   layout_to_stage(src_layout), layout_to_access(src_layout),
-			                   layout_to_stage(target_layout), layout_to_access(target_layout));
-		}
+		cmd->image_barrier(*scale_image, src_layout, target_layout,
+		                   layout_to_stage(src_layout), layout_to_access(src_layout),
+		                   layout_to_stage(target_layout), layout_to_access(target_layout));
 	}
 
 	prev_image_layout = target_layout;
 	prev_scanout_image = scale_image;
-	prev_image_is_external = options.export_scanout;
-
-	if (options.persist_frame_on_invalid_input && options.export_scanout)
-	{
-		LOGE("persist_frame_on_invalid_input cannot be combined with export_scanout.\n");
-		prev_scanout_image.reset();
-	}
 
 	device->submit(cmd);
 	scanout = rdp_move(scale_image);

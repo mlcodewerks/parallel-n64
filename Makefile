@@ -1711,11 +1711,11 @@ test_granite_util$(EXE_EXT): tools/test_granite_util.cpp $(wildcard $(VIDEODIR_P
 		-I$(LIBRETRO_COMM_DIR)/include $< $(GRANITE_POOL_TEST_OBJS) tools/test_granite_util_rthreads.o \
 		-o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
 
-# Granite's allocation retry after freeing cached memory blocks
-test_vk_alloc_fallback$(EXE_EXT): tools/test_vk_alloc_fallback.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.hpp \
-		$(GRANITE_POOL_TEST_OBJS)
-	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DGRANITE_VULKAN_MT -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
-		$< $(GRANITE_POOL_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+# Granite's device memory allocator (tools/test_vk_memory_allocator.c)
+test_vk_memory_allocator$(EXE_EXT): tools/test_vk_memory_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/legion_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
 
 # parallel-RDP's VI intermediate image reuse rules
 test_incoherent_pages$(EXE_EXT): tools/test_incoherent_pages.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/incoherent_pages.hpp
@@ -1723,7 +1723,7 @@ test_incoherent_pages$(EXE_EXT): tools/test_incoherent_pages.cpp $(VIDEODIR_PARA
 
 test_vi_image_pool$(EXE_EXT): tools/test_vi_image_pool.cpp $(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp/vi_image_pool.hpp \
 		$(GRANITE_POOL_TEST_OBJS)
-	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DGRANITE_VULKAN_MT -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
+	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) \
 		$< $(GRANITE_POOL_TEST_OBJS) -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
 COMMAND_RING_TEST_INC := -I$(VIDEODIR_PARALLEL)/parallel-rdp/parallel-rdp -I$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan \
@@ -1743,6 +1743,181 @@ VK_SYNC_TEST_SRC := tools/test_vk_sync.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulka
 	$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c
 test_vk_sync$(EXE_EXT): $(VK_SYNC_TEST_SRC)
 	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's command pools (tools/test_vk_command_pool.c)
+test_vk_command_pool$(EXE_EXT): tools/test_vk_command_pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_pool.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's texture formats and upload layout (tools/test_vk_texture_format.c)
+test_vk_texture_format$(EXE_EXT): tools/test_vk_texture_format.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/texture_format.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's descriptor set allocator (tools/test_vk_descriptor_set.c)
+test_vk_descriptor_set$(EXE_EXT): tools/test_vk_descriptor_set.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's shader and pipeline layouts (tools/test_vk_shader.c)
+test_vk_shader$(EXE_EXT): tools/test_vk_shader.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's per-program pipeline map, from threads (tools/test_vk_pipeline_map.c)
+test_vk_pipeline_map$(EXE_EXT): tools/test_vk_pipeline_map.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_map.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's render passes (tools/test_vk_render_pass.c)
+test_vk_render_pass$(EXE_EXT): tools/test_vk_render_pass.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_pass.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's framebuffer allocator (tools/test_vk_framebuffer.c)
+test_vk_framebuffer$(EXE_EXT): tools/test_vk_framebuffer.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/framebuffer.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's pipeline hashes and create infos (tools/test_vk_pipeline_compile.c)
+test_vk_pipeline_compile$(EXE_EXT): tools/test_vk_pipeline_compile.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_compile.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_pass.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's resource bindings and descriptor set flushing (tools/test_vk_resource_bindings.c)
+test_vk_resource_bindings$(EXE_EXT): tools/test_vk_resource_bindings.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/resource_bindings.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's command buffer state and its flushing (tools/test_vk_command_state.c)
+test_vk_command_state$(EXE_EXT): tools/test_vk_command_state.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_state.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/resource_bindings.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's command buffer operations on images (tools/test_vk_command_ops.c)
+test_vk_command_ops$(EXE_EXT): tools/test_vk_command_ops.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_ops.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's queue submission composer (tools/test_vk_submit_batch.c)
+test_vk_submit_batch$(EXE_EXT): tools/test_vk_submit_batch.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/submit_batch.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's memory type choice and buffer creation (tools/test_vk_buffer_create.c)
+test_vk_buffer_create$(EXE_EXT): tools/test_vk_buffer_create.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer_create.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/legion_allocator.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's image and image view creation (tools/test_vk_image_create.c)
+test_vk_image_create$(EXE_EXT): tools/test_vk_image_create.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/image_create.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer_create.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_ops.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/legion_allocator.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's image upload (tools/test_vk_image_upload.c)
+test_vk_image_upload$(EXE_EXT): tools/test_vk_image_upload.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/image_upload.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/image_create.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/texture_format.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer_create.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_ops.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/legion_allocator.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's vertex and uniform block pool (tools/test_vk_buffer_pool.c)
+test_vk_buffer_pool$(EXE_EXT): tools/test_vk_buffer_pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer_pool.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's counted buffers and buffer views (tools/test_vk_buffer.c)
+test_vk_buffer$(EXE_EXT): tools/test_vk_buffer.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/cookie.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's counted images and image views (tools/test_vk_image.c)
+test_vk_image$(EXE_EXT): tools/test_vk_image.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/image.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/cookie.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's sampler (tools/test_vk_sampler.c)
+test_vk_sampler$(EXE_EXT): tools/test_vk_sampler.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sampler.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/cookie.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's counted fences (tools/test_vk_fence.c)
+test_vk_fence$(EXE_EXT): tools/test_vk_fence.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/fence.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/fence_wait.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c $(LIBRETRO_COMM_DIR)/rthreads/retro_eventcount.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's counted semaphores (tools/test_vk_semaphore.c)
+test_vk_semaphore$(EXE_EXT): tools/test_vk_semaphore.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/semaphore.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/submit_batch.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's queue waits and staging plan (tools/test_vk_queue_submit.c)
+test_vk_queue_submit$(EXE_EXT): tools/test_vk_queue_submit.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/queue_submit.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/semaphore.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/submit_batch.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/sync_pools.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's frame waits (tools/test_vk_frame_sync.c)
+test_vk_frame_sync$(EXE_EXT): tools/test_vk_frame_sync.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_sync.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's deferred memory release (tools/test_vk_memory_release.c)
+test_vk_memory_release$(EXE_EXT): tools/test_vk_memory_release.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_release.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/memory_allocator.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/legion_allocator.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's Vulkan context (tools/test_vk_context.c)
+test_vk_context$(EXE_EXT): tools/test_vk_context.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/context.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's device capabilities (tools/test_vk_device_caps.c)
+test_vk_device_caps$(EXE_EXT): tools/test_vk_device_caps.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/device_caps.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
+# Granite's shader, program and layout caches (tools/test_vk_program_cache.c)
+test_vk_program_cache$(EXE_EXT): tools/test_vk_program_cache.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/program_cache.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_map.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_pass.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's render targets (tools/test_vk_render_target.c)
+test_vk_render_target$(EXE_EXT): tools/test_vk_render_target.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_target.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/program_cache.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/framebuffer.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_map.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_pass.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's command buffer (tools/test_vk_command_buffer.c)
+test_vk_command_buffer$(EXE_EXT): tools/test_vk_command_buffer.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_buffer.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_state.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/command_ops.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/resource_bindings.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/descriptor_set.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/shader.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_compile.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_map.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/program_cache.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_pass.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/render_target.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/framebuffer.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/device_caps.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/buffer_pool.c \
+		$(VIDEODIR_PARALLEL)/parallel-rdp/util/pool.c $(VIDEODIR_PARALLEL)/parallel-rdp/util/aligned_alloc.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
+
+# Granite's saved pipeline cache and pipeline record table (tools/test_vk_pipeline_cache.c)
+test_vk_pipeline_cache$(EXE_EXT): tools/test_vk_pipeline_cache.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/pipeline_cache.c \
+		$(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+	$(CC) $(CHECK_CFLAGS) $(CHECK_SANITIZE) -DRETRO_ATOMIC_FORCE_GCC_NEW $(COMMAND_RING_TEST_INC) $^ -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE) -lpthread
 
 # Granite's per-frame garbage lists (tools/test_frame_garbage.c)
 test_frame_garbage$(EXE_EXT): tools/test_frame_garbage.c $(VIDEODIR_PARALLEL)/parallel-rdp/vulkan/frame_garbage.c \
@@ -1789,6 +1964,11 @@ test_gliden64_texture_formats$(EXE_EXT): tools/test_gliden64_texture_formats.c $
 test_gliden64_rdram_to_color$(EXE_EXT): tools/test_gliden64_rdram_to_color.c $(VIDEODIR_GLIDEN64)/src/RdramToColor.c $(VIDEODIR_GLIDEN64)/src/gli_rdram_to_color.h
 	$(CC) -std=c89 -D_DEFAULT_SOURCE $(CHECK_CFLAGS) $(CHECK_SANITIZE) -I$(VIDEODIR_GLIDEN64)/src -I$(LIBRETRO_COMM_DIR)/include tools/test_gliden64_rdram_to_color.c $(VIDEODIR_GLIDEN64)/src/RdramToColor.c -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
+# -Ofast as the core itself is built: that is what turned the quotient into
+# a product with the reciprocal
+test_gliden64_window_scale$(EXE_EXT): tools/test_gliden64_window_scale.c $(VIDEODIR_GLIDEN64)/src/DisplayWindow.c
+	$(CC) $(CHECK_CFLAGS) -Ofast $(CHECK_SANITIZE) -I$(VIDEODIR_GLIDEN64)/src -I$(LIBRETRO_COMM_DIR)/include -I$(CORE_DIR)/src/api tools/test_gliden64_window_scale.c $(VIDEODIR_GLIDEN64)/src/DisplayWindow.c -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
+
 test_gliden64_deferred_readback$(EXE_EXT): tools/test_gliden64_deferred_readback.cpp $(VIDEODIR_GLIDEN64)/src/BufferCopy/DeferredReadback.h
 	$(CXX) -std=c++11 $(CHECK_CFLAGS) $(CHECK_SANITIZE) $< -o $@ $(CHECK_LDFLAGS) $(CHECK_SANITIZE)
 
@@ -1804,7 +1984,7 @@ GLIDEN64_C89 := N64.c convert.c RSP_LoadMatrix.c 3DMath.c CRC32.c RDP.c CRC_OPT.
 	uCodes/F3DEX2.c uCodes/F3DEX2ACCLAIM.c uCodes/F3DFLX2.c uCodes/L3D.c uCodes/L3DEX.c uCodes/L3DEX2.c uCodes/F3DEX3.c \
 	uCodes/F3DEX095.c uCodes/F3DZEX2.c uCodes/F3DPD.c uCodes/F3DTEXA.c uCodes/F3DGOLDEN.c uCodes/S2DEX2.c uCodes/F3DBETA.c uCodes/F3DAM.c uCodes/F3DEX.c uCodes/F3DSETA.c uCodes/F3DDKR.c uCodes/F3DEX2CBFD.c uCodes/F3D.c \
 	Graphics/VulkanContext/vk_spirv.c Graphics/VulkanContext/vk_shaders.c \
-	Graphics/VulkanContext/vk_renderer.c Graphics/VulkanContext/vk_device.c
+	Graphics/VulkanContext/vk_renderer.c Graphics/VulkanContext/vk_device.c Graphics/VulkanContext/vk_upscaler.c
 check_gliden64_c89:
 	@if grep -rn "pragma GCC diagnostic" $(VIDEODIR_GLIDEN64)/src --include=*.h --include=*.c --exclude-dir=inc; then echo "no diagnostic pragmas: they turn this check off"; exit 1; fi
 	for f in $(GLIDEN64_C89); do $(CC) -std=c89 -pedantic -Wno-long-long -Werror=pedantic -Werror=declaration-after-statement \
@@ -1825,8 +2005,8 @@ CORE_CHECKS := test_rcp_bounds$(EXE_EXT) test_memory_map$(EXE_EXT) test_fb_write
 	test_musyx_bounds$(EXE_EXT) test_musyx_aux$(EXE_EXT) test_alist_ops$(EXE_EXT) test_alist_abi1$(EXE_EXT) test_hle_dispatch$(EXE_EXT) angrylion_zboss_audio_test$(EXE_EXT) \
 	test_mouse_accum$(EXE_EXT) test_hle_dram_wrap$(EXE_EXT) test_pif_write$(EXE_EXT) \
 	test_re2_fill$(EXE_EXT) test_temporal_upscaler$(EXE_EXT) test_pipeline_records$(EXE_EXT) test_pipeline_pending$(EXE_EXT) test_rdp_x_range$(EXE_EXT) \
-	test_command_ring$(EXE_EXT) test_vk_sync$(EXE_EXT) test_frame_garbage$(EXE_EXT) test_release_queue$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT) \
-	test_combiner_journal$(EXE_EXT) test_gliden64_write_rdram$(EXE_EXT) test_gliden64_rdram_to_color$(EXE_EXT) test_gliden64_texture_formats$(EXE_EXT) test_glide64_texmod$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_granite_pool$(EXE_EXT) test_vk_alloc_fallback$(EXE_EXT) \
+	test_command_ring$(EXE_EXT) test_vk_sync$(EXE_EXT) test_vk_command_pool$(EXE_EXT) test_vk_texture_format$(EXE_EXT) test_vk_descriptor_set$(EXE_EXT) test_vk_shader$(EXE_EXT) test_vk_pipeline_map$(EXE_EXT) test_vk_render_pass$(EXE_EXT) test_vk_framebuffer$(EXE_EXT) test_vk_pipeline_compile$(EXE_EXT) test_vk_resource_bindings$(EXE_EXT) test_vk_command_state$(EXE_EXT) test_vk_command_ops$(EXE_EXT) test_vk_submit_batch$(EXE_EXT) test_vk_buffer_create$(EXE_EXT) test_vk_image_create$(EXE_EXT) test_vk_image_upload$(EXE_EXT) test_vk_buffer_pool$(EXE_EXT) test_vk_buffer$(EXE_EXT) test_vk_image$(EXE_EXT) test_vk_sampler$(EXE_EXT) test_vk_fence$(EXE_EXT) test_vk_semaphore$(EXE_EXT) test_vk_queue_submit$(EXE_EXT) test_vk_frame_sync$(EXE_EXT) test_vk_memory_release$(EXE_EXT) test_vk_context$(EXE_EXT) test_vk_device_caps$(EXE_EXT) test_vk_program_cache$(EXE_EXT) test_vk_render_target$(EXE_EXT) test_vk_command_buffer$(EXE_EXT) test_vk_pipeline_cache$(EXE_EXT) test_frame_garbage$(EXE_EXT) test_release_queue$(EXE_EXT) test_gb_cart_banks$(EXE_EXT) test_dynarec_cache_pages$(EXE_EXT) \
+	test_combiner_journal$(EXE_EXT) test_gliden64_write_rdram$(EXE_EXT) test_gliden64_rdram_to_color$(EXE_EXT) test_gliden64_window_scale$(EXE_EXT) test_gliden64_texture_formats$(EXE_EXT) test_glide64_texmod$(EXE_EXT) test_gliden64_deferred_readback$(EXE_EXT) test_gliden64_ring_segments$(EXE_EXT) test_glide64_fb_readback$(EXE_EXT) test_granite_util$(EXE_EXT) test_granite_pool$(EXE_EXT) test_vk_memory_allocator$(EXE_EXT) \
 	test_vi_image_pool$(EXE_EXT) test_incoherent_pages$(EXE_EXT)
 
 ifeq ($(HAVE_PARALLEL_RSP), 1)
